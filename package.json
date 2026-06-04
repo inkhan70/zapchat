@@ -1,0 +1,13 @@
+{
+  "name": "zapchat",
+  "version": "1.0.0",
+  "description": "ZapChat – Full Stack Real-Time Chat App (WhatsApp-style)",
+  "scripts": {
+    "install:all": "cd server && npm install",
+    "start": "cd server && node index.js",
+    "dev": "cd server && npx nodemon index.js"
+  },
+  "keywords": ["chat", "socket.io", "real-time", "websocket", "whatsapp-clone"],
+  "author": "",
+  "license": "MIT"
+}

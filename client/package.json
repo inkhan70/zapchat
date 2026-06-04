@@ -1,0 +1,10 @@
+{
+  "name": "zap-chat-client",
+  "version": "1.0.0",
+  "description": "ZapChat - Full Stack Real-Time Chat App Frontend",
+  "scripts": {
+    "build": "echo 'Static HTML/CSS/JS - no build needed'",
+    "start": "npx serve public -p 3000"
+  },
+  "dependencies": {}
+}
