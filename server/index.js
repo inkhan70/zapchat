@@ -7,43 +7,96 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
+const mongoose = require('mongoose');
 
 const app = express();
 const server = http.createServer(app);
 
 const JWT_SECRET = process.env.JWT_SECRET || 'zapchat_super_secret_key_2024';
 const PORT = process.env.PORT || 5000;
-const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
+const CLIENT_URL = process.env.CLIENT_URL || '*';
+const MONGODB_URI = process.env.MONGODB_URI || '';
 
-// ─── In-Memory Store (replace with DB in production) ───────────────────────
-const users = new Map();        // username → { id, username, passwordHash, avatar, createdAt }
-const sessions = new Map();     // socketId → { userId, username }
-const messages = new Map();     // roomId → [{ id, from, to, text, timestamp, read }]
-const onlineUsers = new Map();  // username → socketId
+// ─── MongoDB Connection ─────────────────────────────────────────────────────
+if (MONGODB_URI) {
+  mongoose.connect(MONGODB_URI)
+    .then(() => console.log('✅ MongoDB connected'))
+    .catch(err => console.error('❌ MongoDB error:', err.message));
+}
+
+// ─── MongoDB Schemas ────────────────────────────────────────────────────────
+const UserSchema = new mongoose.Schema({
+  id:           { type: String, required: true, unique: true },
+  username:     { type: String, required: true, unique: true },
+  passwordHash: { type: String, required: true },
+  avatar:       { type: String },
+  status:       { type: String, default: 'Hey there! I am using ZapChat.' },
+  createdAt:    { type: Date, default: Date.now },
+});
+
+const MessageSchema = new mongoose.Schema({
+  id:        { type: String, required: true, unique: true },
+  roomId:    { type: String, required: true, index: true },
+  from:      { type: String, required: true },
+  to:        { type: String, required: true },
+  text:      { type: String, required: true },
+  timestamp: { type: Date, default: Date.now },
+  read:      { type: Boolean, default: false },
+});
+
+const UserModel    = mongoose.models.User    || mongoose.model('User',    UserSchema);
+const MessageModel = mongoose.models.Message || mongoose.model('Message', MessageSchema);
+
+// ─── In-Memory Fallback (used when MongoDB not connected) ───────────────────
+const users      = new Map();
+const sessions   = new Map();
+const messages   = new Map();
+const onlineUsers = new Map();
 
 // ─── Express Middleware ─────────────────────────────────────────────────────
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
 app.use(express.json());
-app.use(express.static(path.join(__dirname, '../client/public')));
+
+// Serve bundled frontend from server/public/
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+function getRoomId(a, b) { return [a, b].sort().join('::'); }
+
+function verifyToken(req, res) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) { res.status(401).json({ error: 'Unauthorized' }); return null; }
+  try {
+    return jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+  } catch {
+    res.status(401).json({ error: 'Invalid token' }); return null;
+  }
+}
 
 // ─── REST API ───────────────────────────────────────────────────────────────
 app.post('/api/register', async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-  if (username.length < 3) return res.status(400).json({ error: 'Username must be at least 3 characters' });
-  if (password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
-  if (users.has(username)) return res.status(409).json({ error: 'Username already taken' });
+  if (!username || !password)        return res.status(400).json({ error: 'Username and password required' });
+  if (username.length < 3)           return res.status(400).json({ error: 'Username must be at least 3 characters' });
+  if (password.length < 4)           return res.status(400).json({ error: 'Password must be at least 4 characters' });
 
   const passwordHash = await bcrypt.hash(password, 10);
   const user = {
-    id: uuidv4(),
-    username,
-    passwordHash,
+    id: uuidv4(), username, passwordHash,
     avatar: username.charAt(0).toUpperCase(),
     status: 'Hey there! I am using ZapChat.',
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
   };
-  users.set(username, user);
+
+  if (MONGODB_URI && mongoose.connection.readyState === 1) {
+    const exists = await UserModel.findOne({ username });
+    if (exists) return res.status(409).json({ error: 'Username already taken' });
+    await UserModel.create(user);
+  } else {
+    if (users.has(username)) return res.status(409).json({ error: 'Username already taken' });
+    users.set(username, user);
+  }
+
   const token = jwt.sign({ id: user.id, username }, JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, user: { id: user.id, username, avatar: user.avatar, status: user.status } });
 });
@@ -51,52 +104,56 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-  const user = users.get(username);
+
+  let user;
+  if (MONGODB_URI && mongoose.connection.readyState === 1) {
+    user = await UserModel.findOne({ username }).lean();
+  } else {
+    user = users.get(username);
+  }
+
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+
   const token = jwt.sign({ id: user.id, username }, JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, user: { id: user.id, username, avatar: user.avatar, status: user.status } });
 });
 
-app.get('/api/users', (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  try {
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const allUsers = Array.from(users.values())
-      .filter(u => u.username !== decoded.username)
-      .map(u => ({
-        id: u.id,
-        username: u.username,
-        avatar: u.avatar,
-        status: u.status,
-        online: onlineUsers.has(u.username)
-      }));
-    res.json(allUsers);
-  } catch {
-    res.status(401).json({ error: 'Invalid token' });
+app.get('/api/users', async (req, res) => {
+  const decoded = verifyToken(req, res);
+  if (!decoded) return;
+
+  let allUsers;
+  if (MONGODB_URI && mongoose.connection.readyState === 1) {
+    allUsers = await UserModel.find({ username: { $ne: decoded.username } }).lean();
+  } else {
+    allUsers = Array.from(users.values()).filter(u => u.username !== decoded.username);
   }
+
+  res.json(allUsers.map(u => ({
+    id: u.id, username: u.username, avatar: u.avatar, status: u.status,
+    online: onlineUsers.has(u.username),
+  })));
 });
 
-app.get('/api/messages/:with', (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  try {
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const roomId = getRoomId(decoded.username, req.params.with);
-    const roomMessages = messages.get(roomId) || [];
-    res.json(roomMessages);
-  } catch {
-    res.status(401).json({ error: 'Invalid token' });
+app.get('/api/messages/:with', async (req, res) => {
+  const decoded = verifyToken(req, res);
+  if (!decoded) return;
+
+  const roomId = getRoomId(decoded.username, req.params.with);
+  let msgs;
+  if (MONGODB_URI && mongoose.connection.readyState === 1) {
+    msgs = await MessageModel.find({ roomId }).sort({ timestamp: 1 }).lean();
+  } else {
+    msgs = messages.get(roomId) || [];
   }
+  res.json(msgs);
 });
 
-// Serve client on non-API routes
+// Serve frontend on all non-API routes
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../client/public/index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // ─── Socket.IO ──────────────────────────────────────────────────────────────
@@ -104,92 +161,65 @@ const io = new Server(server, {
   cors: { origin: CLIENT_URL, methods: ['GET', 'POST'], credentials: true }
 });
 
-function getRoomId(a, b) {
-  return [a, b].sort().join('::');
-}
-
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error('Authentication required'));
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    socket.user = decoded;
+    socket.user = jwt.verify(token, JWT_SECRET);
     next();
-  } catch {
-    next(new Error('Invalid token'));
-  }
+  } catch { next(new Error('Invalid token')); }
 });
 
 io.on('connection', (socket) => {
   const { username } = socket.user;
   onlineUsers.set(username, socket.id);
   sessions.set(socket.id, { username });
-
   console.log(`✅ ${username} connected (${socket.id})`);
 
-  // Broadcast online status
   io.emit('user_status', { username, online: true });
+  socket.emit('online_users', Array.from(onlineUsers.keys()));
 
-  // Send current online users list
-  const onlineList = Array.from(onlineUsers.keys());
-  socket.emit('online_users', onlineList);
-
-  // ── Private Message ──────────────────────────────
-  socket.on('private_message', ({ to, text }) => {
-    if (!text || !text.trim() || !to) return;
+  socket.on('private_message', async ({ to, text }) => {
+    if (!text?.trim() || !to) return;
     const msg = {
-      id: uuidv4(),
-      from: username,
-      to,
-      text: text.trim(),
-      timestamp: new Date().toISOString(),
-      read: false
+      id: uuidv4(), from: username, to,
+      text: text.trim(), timestamp: new Date().toISOString(), read: false,
     };
 
     const roomId = getRoomId(username, to);
-    if (!messages.has(roomId)) messages.set(roomId, []);
-    messages.get(roomId).push(msg);
-
-    // Send to recipient if online
-    const recipientSocketId = onlineUsers.get(to);
-    if (recipientSocketId) {
-      io.to(recipientSocketId).emit('private_message', msg);
+    if (MONGODB_URI && mongoose.connection.readyState === 1) {
+      await MessageModel.create({ ...msg, roomId }).catch(console.error);
+    } else {
+      if (!messages.has(roomId)) messages.set(roomId, []);
+      messages.get(roomId).push(msg);
     }
 
-    // Echo back to sender
+    const recipientSocketId = onlineUsers.get(to);
+    if (recipientSocketId) io.to(recipientSocketId).emit('private_message', msg);
     socket.emit('message_sent', msg);
   });
 
-  // ── Typing Indicator ─────────────────────────────
   socket.on('typing_start', ({ to }) => {
-    const recipientSocketId = onlineUsers.get(to);
-    if (recipientSocketId) {
-      io.to(recipientSocketId).emit('typing_start', { from: username });
-    }
+    const r = onlineUsers.get(to);
+    if (r) io.to(r).emit('typing_start', { from: username });
   });
 
   socket.on('typing_stop', ({ to }) => {
-    const recipientSocketId = onlineUsers.get(to);
-    if (recipientSocketId) {
-      io.to(recipientSocketId).emit('typing_stop', { from: username });
-    }
+    const r = onlineUsers.get(to);
+    if (r) io.to(r).emit('typing_stop', { from: username });
   });
 
-  // ── Read Receipts ────────────────────────────────
-  socket.on('mark_read', ({ from }) => {
+  socket.on('mark_read', async ({ from }) => {
     const roomId = getRoomId(username, from);
-    const roomMessages = messages.get(roomId) || [];
-    roomMessages.forEach(msg => {
-      if (msg.to === username) msg.read = true;
-    });
-
-    const senderSocketId = onlineUsers.get(from);
-    if (senderSocketId) {
-      io.to(senderSocketId).emit('messages_read', { by: username });
+    if (MONGODB_URI && mongoose.connection.readyState === 1) {
+      await MessageModel.updateMany({ roomId, to: username }, { read: true }).catch(console.error);
+    } else {
+      (messages.get(roomId) || []).forEach(m => { if (m.to === username) m.read = true; });
     }
+    const senderSocket = onlineUsers.get(from);
+    if (senderSocket) io.to(senderSocket).emit('messages_read', { by: username });
   });
 
-  // ── Disconnect ───────────────────────────────────
   socket.on('disconnect', () => {
     onlineUsers.delete(username);
     sessions.delete(socket.id);
@@ -200,4 +230,5 @@ io.on('connection', (socket) => {
 
 server.listen(PORT, () => {
   console.log(`🚀 ZapChat server running on http://localhost:${PORT}`);
+  console.log(`📦 MongoDB: ${MONGODB_URI ? 'configured' : 'using in-memory store'}`);
 });
