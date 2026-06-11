@@ -150,7 +150,10 @@ app.get('/api/messages/:with', async (req, res) => {
   }
   res.json(msgs);
 });
-
+// Health check endpoint for deployment monitoring
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'UP', timestamp: new Date() });
+});
 // Serve frontend on all non-API routes
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
