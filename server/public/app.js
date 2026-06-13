@@ -163,8 +163,10 @@ class ZapChat {
   connectSocket() {
     this.socket = io(API, {
       auth: { token: this.token },
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1500
+      transports: ['polling'],
+      reconnectionAttempts: 10,
+      reconnectionDelay: 2000,
+      timeout: 20000
     });
 
     this.socket.on('connect', () => {
