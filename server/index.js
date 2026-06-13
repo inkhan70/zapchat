@@ -161,7 +161,14 @@ app.get('*', (req, res) => {
 
 // ─── Socket.IO ──────────────────────────────────────────────────────────────
 const io = new Server(server, {
-  cors: { origin: CLIENT_URL, methods: ['GET', 'POST'], credentials: true }
+  cors: { origin: CLIENT_URL, methods: ['GET', 'POST'], credentials: true },
+  transports: ['polling', 'websocket'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  upgradeTimeout: 30000,
+  allowUpgrades: true,
+  cookie: false
 });
 
 io.use((socket, next) => {
