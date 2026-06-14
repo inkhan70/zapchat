@@ -2,7 +2,7 @@
    ZapChat – Client App
    ═══════════════════════════════════════════ */
 
-const API = 'https://zapchat-server-inkhan.vercel.app';
+const API = 'https://zapchat-server.vercel.app';
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
 class ZapChat {
