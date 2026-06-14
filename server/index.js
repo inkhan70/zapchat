@@ -15,7 +15,7 @@ const server = http.createServer(app);
 const JWT_SECRET = process.env.JWT_SECRET || 'zapchat_super_secret_key_2024';
 const PORT = process.env.PORT || 5000;
 const CLIENT_URL = process.env.CLIENT_URL || '*';
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://inayatkhan091_db_user:YOUR_ACTUAL_PASSWORD_HERE@cluster0.bsbhv2w.mongodb.net/?appName=Cluster0';
+const MONGODB_URI = process.env.MONGODB_URI;
 
 // ——— MongoDB Connection ———
 if (MONGODB_URI) {
