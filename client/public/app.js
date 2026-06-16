@@ -2,19 +2,34 @@
    ZapChat – Client App
    ═══════════════════════════════════════════ */
 
-const API = 'https://zapchat-server-inkhan.vercel.app';
+// CRITICAL PRODUCTION FIX: Dynamic endpoint tracking
+// If running on local computer, uses local port. If live on Back4app, uses live domain automatically.
+const API = window.location.origin.includes('localhost') 
+  ? 'http://localhost:5000' 
+  : window.location.origin;
+
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
 class ZapChat {
   constructor() {
-    this.socket    = null;
-    this.token     = localStorage.getItem('zc_token');
-    this.user      = JSON.parse(localStorage.getItem('zc_user') || 'null');
+    this.socket     = null;
+    this.token      = localStorage.getItem('zc_token');
+    this.user       = JSON.parse(localStorage.getItem('zc_user') || 'null');
     this.activeChat = null;      // username of current chat partner
-    this.chats     = new Map();  // username → { messages[], unread, lastMsg, lastTime, typing }
-    this.onlineSet = new Set();
+    this.chats      = new Map();  // username → { messages[], unread, lastMsg, lastTime, typing }
+    this.onlineSet  = new Set();
     this.typingTimer = null;
-    this.isTyping  = false;
+    this.isTyping   = false;
+
+    // Cache frequent DOM elements for rendering performance
+    this.domCache = {
+      messagesArea: document.getElementById('messages-area'),
+      messageInput: document.getElementById('message-input'),
+      chatStatus: document.getElementById('chat-status'),
+      emojiPicker: document.getElementById('emoji-picker'),
+      usersList: document.getElementById('users-list'),
+      chatsSection: document.getElementById('chats-section'),
+    };
 
     this.bindAuthUI();
     if (this.token && this.user) this.boot();
@@ -31,7 +46,7 @@ class ZapChat {
         document.querySelectorAll('.auth-panel').forEach(p => p.classList.remove('active'));
         document.getElementById(which + '-panel').classList.add('active');
         const slider = document.querySelector('.auth-tab-slider');
-        slider.classList.toggle('right', which === 'register');
+        if (slider) slider.classList.toggle('right', which === 'register');
       });
     });
 
@@ -128,8 +143,8 @@ class ZapChat {
     // Search
     document.getElementById('search-input').addEventListener('input', e => this.filterContacts(e.target.value));
 
-    // Message input
-    const input = document.getElementById('message-input');
+    // Message input references
+    const input = this.domCache.messageInput;
     input.addEventListener('input', () => this.onInputChange());
     input.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.sendMessage(); }
@@ -144,13 +159,13 @@ class ZapChat {
     // Emoji
     document.querySelector('.emoji-btn').addEventListener('click', e => {
       e.stopPropagation();
-      const picker = document.getElementById('emoji-picker');
+      const picker = this.domCache.emojiPicker;
       picker.classList.toggle('hidden');
       if (!picker.children.length) this.buildEmojiPicker();
     });
-    document.addEventListener('click', () => document.getElementById('emoji-picker').classList.add('hidden'));
+    document.addEventListener('click', () => this.domCache.emojiPicker.classList.add('hidden'));
 
-    // Toast container
+    // Toast container installation
     const toasts = document.createElement('div');
     toasts.className = 'toast-container';
     document.body.appendChild(toasts);
@@ -161,10 +176,13 @@ class ZapChat {
 
   // ─── SOCKET ──────────────────────────────────────────────────────────────
   connectSocket() {
+    // Optimized for production WebSocket transport handshakes
     this.socket = io(API, {
       auth: { token: this.token },
+      transports: ['websocket', 'polling'],
+      secure: true,
       reconnectionAttempts: 5,
-      reconnectionDelay: 1500
+      reconnectionDelay: 2000
     });
 
     this.socket.on('connect', () => {
@@ -190,7 +208,7 @@ class ZapChat {
       else this.onlineSet.delete(username);
       this.refreshOnlineStatus();
       if (username === this.activeChat) {
-        document.getElementById('chat-status').textContent = online ? '🟢 Online' : '🔒 Encrypted';
+        this.domCache.chatStatus.textContent = online ? '🟢 Online' : '🔒 Encrypted';
       }
     });
 
@@ -203,7 +221,7 @@ class ZapChat {
     });
 
     this.socket.on('typing_start', ({ from }) => {
-      if (!this.chats.has(from)) this.ensureChat(from);
+      this.ensureChat(from);
       this.chats.get(from).typing = true;
       this.updateChatListItem(from);
       if (this.activeChat === from) this.showTypingIndicator();
@@ -218,7 +236,9 @@ class ZapChat {
     this.socket.on('messages_read', ({ by }) => {
       if (this.chats.has(by)) {
         const msgs = this.chats.get(by).messages;
-        msgs.forEach(m => { if (m.from === this.user.username) m.status = 'read'; });
+        for (let i = 0; i < msgs.length; i++) {
+          if (msgs[i].from === this.user.username) msgs[i].status = 'read';
+        }
         if (this.activeChat === by) this.updateReadStatuses();
       }
     });
@@ -232,20 +252,29 @@ class ZapChat {
       });
       const users = await res.json();
       this.renderContacts(users);
-    } catch {}
+    } catch (err) {
+      console.error('Failed to fetch contacts:', err);
+    }
   }
 
   renderContacts(users) {
-    const list = document.getElementById('users-list');
+    const list = this.domCache.usersList;
+    
+    // Performance: Use DocumentFragment to prevent browser layout reflow redraw cycles
+    const fragment = document.createDocumentFragment();
     list.innerHTML = '';
+    
     if (!users.length) {
       list.innerHTML = '<div class="empty-state"><i class="fas fa-user-slash"></i><p>No other users yet.</p></div>';
       return;
     }
+    
     users.forEach(u => {
       if (this.onlineSet.has(u.username)) u.online = true;
-      list.appendChild(this.createContactEl(u, false));
+      fragment.appendChild(this.createContactEl(u, false));
     });
+    
+    list.appendChild(fragment);
   }
 
   createContactEl(user, isChatItem = false) {
@@ -276,16 +305,19 @@ class ZapChat {
   }
 
   refreshOnlineStatus() {
-    document.querySelectorAll('.contact-item').forEach(el => {
-      const un = el.dataset.username;
-      el.querySelector('.c-avatar').classList.toggle('online', this.onlineSet.has(un));
-    });
+    const items = this.domCache.usersList.getElementsByClassName('contact-item');
+    for (let i = 0; i < items.length; i++) {
+      const un = items[i].dataset.username;
+      const avatar = items[i].querySelector('.c-avatar');
+      if (avatar) avatar.classList.toggle('online', this.onlineSet.has(un));
+    }
   }
 
   filterContacts(q) {
+    const searchString = q.toLowerCase();
     document.querySelectorAll('.contact-item').forEach(el => {
       const name = el.dataset.username?.toLowerCase() || '';
-      el.style.display = name.includes(q.toLowerCase()) ? '' : 'none';
+      el.style.display = name.includes(searchString) ? '' : 'none';
     });
   }
 
@@ -297,52 +329,55 @@ class ZapChat {
 
   // ─── OPEN / CLOSE CHAT ───────────────────────────────────────────────────
   async openChat(username) {
+    if (this.activeChat === username) return; // Prevent double trigger overhead
+    
     this.activeChat = username;
     this.ensureChat(username);
 
-    // Reset unread
+    // Reset unread counts instantly
     this.chats.get(username).unread = 0;
     this.socket.emit('mark_read', { from: username });
 
-    // Update UI
+    // Update Top Appbar Information
     document.getElementById('chat-name').textContent = username;
     document.getElementById('chat-avatar').textContent = username.charAt(0).toUpperCase();
-    const isOnline = this.onlineSet.has(username);
-    document.getElementById('chat-status').textContent = isOnline ? '🟢 Online' : '🔒 Encrypted';
+    this.domCache.chatStatus.textContent = this.onlineSet.has(username) ? '🟢 Online' : '🔒 Encrypted';
 
     document.getElementById('chat-empty').classList.add('hidden');
     document.getElementById('active-chat').classList.remove('hidden');
 
-    // Mobile: slide in
+    // Mobile UI Slide handles
     document.querySelector('.chat-panel').classList.add('visible');
     document.querySelector('.sidebar').classList.add('hidden-mobile');
 
-    // Active highlight in list
+    // Active visual highlight
     document.querySelectorAll('.contact-item').forEach(el => {
       el.classList.toggle('active', el.dataset.username === username);
     });
 
-    // Load messages
-    const msgArea = document.getElementById('messages-area');
+    const msgArea = this.domCache.messagesArea;
     msgArea.innerHTML = '<div class="messages-date-divider"><span>Today</span></div>';
 
-    // Fetch history
+    // Populate messaging logs smoothly
     try {
       const res = await fetch(`${API}/api/messages/${username}`, {
         headers: { Authorization: `Bearer ${this.token}` }
       });
       const history = await res.json();
-      const chat = this.chats.get(username);
-      chat.messages = history;
-      history.forEach(m => this.renderMessage(m));
+      this.chats.get(username).messages = history;
+      
+      const fragment = document.createDocumentFragment();
+      history.forEach(m => this.renderMessage(m, fragment));
+      msgArea.appendChild(fragment);
     } catch {
-      this.chats.get(username).messages.forEach(m => this.renderMessage(m));
+      const fragment = document.createDocumentFragment();
+      this.chats.get(username).messages.forEach(m => this.renderMessage(m, fragment));
+      msgArea.appendChild(fragment);
     }
 
     this.scrollBottom();
-    document.getElementById('message-input').focus();
+    this.domCache.messageInput.focus();
 
-    // Remove typing indicator
     this.removeTypingIndicator();
     if (this.chats.get(username).typing) this.showTypingIndicator();
 
@@ -357,7 +392,7 @@ class ZapChat {
 
   // ─── MESSAGES ────────────────────────────────────────────────────────────
   sendMessage() {
-    const input = document.getElementById('message-input');
+    const input = this.domCache.messageInput;
     const text = input.value.trim();
     if (!text || !this.activeChat) return;
 
@@ -365,7 +400,6 @@ class ZapChat {
     input.value = '';
     input.style.height = 'auto';
 
-    // Stop typing
     this.stopTyping();
   }
 
@@ -378,11 +412,10 @@ class ZapChat {
     chat.lastTime = msg.timestamp;
 
     if (this.activeChat === msg.to) {
-      this.renderMessage(msg);
+      this.renderMessage(msg, this.domCache.messagesArea);
       this.scrollBottom();
     }
     this.updateChatListItem(msg.to);
-    this.upsertChatsSection(msg.to);
   }
 
   receiveMessage(msg) {
@@ -395,9 +428,8 @@ class ZapChat {
 
     if (this.activeChat === msg.from) {
       this.removeTypingIndicator();
-      this.renderMessage(msg);
+      this.renderMessage(msg, this.domCache.messagesArea);
       this.scrollBottom();
-      // mark as read immediately
       this.socket.emit('mark_read', { from: msg.from });
     } else {
       chat.unread = (chat.unread || 0) + 1;
@@ -405,20 +437,17 @@ class ZapChat {
     }
 
     this.updateChatListItem(msg.from);
-    this.upsertChatsSection(msg.from);
   }
 
-  renderMessage(msg) {
+  renderMessage(msg, targetContainer) {
     const isSent = msg.from === this.user.username;
-    const area = document.getElementById('messages-area');
-
     const row = document.createElement('div');
     row.className = `msg-row ${isSent ? 'sent' : 'received'}`;
     row.dataset.id = msg.id;
 
     const statusIcon = isSent
       ? `<span class="msg-status ${msg.status || 'sent'}">
-           ${msg.status === 'read' ? '✓✓' : msg.status === 'delivered' ? '✓✓' : '✓'}
+           ${msg.status === 'read' ? '✓✓' : '✓'}
          </span>`
       : '';
 
@@ -431,11 +460,11 @@ class ZapChat {
         </div>
       </div>
     `;
-    area.appendChild(row);
+    targetContainer.appendChild(row);
   }
 
   updateReadStatuses() {
-    document.querySelectorAll('.msg-row.sent .msg-status').forEach(el => {
+    this.domCache.messagesArea.querySelectorAll('.msg-row.sent .msg-status').forEach(el => {
       el.className = 'msg-status read';
       el.textContent = '✓✓';
     });
@@ -443,8 +472,7 @@ class ZapChat {
 
   // ─── TYPING ──────────────────────────────────────────────────────────────
   onInputChange() {
-    const input = document.getElementById('message-input');
-    // Auto-resize
+    const input = this.domCache.messageInput;
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
 
@@ -454,12 +482,13 @@ class ZapChat {
       this.socket.emit('typing_start', { to: this.activeChat });
     }
     clearTimeout(this.typingTimer);
-    this.typingTimer = setTimeout(() => this.stopTyping(), 2500);
+    this.typingTimer = setTimeout(() => this.stopTyping(), 2000);
   }
 
   stopTyping() {
     if (this.isTyping && this.activeChat) {
       this.isTyping = false;
+      this.socket.emit('typing_start', { to: this.activeChat });
       this.socket.emit('typing_stop', { to: this.activeChat });
     }
     clearTimeout(this.typingTimer);
@@ -467,12 +496,11 @@ class ZapChat {
 
   showTypingIndicator() {
     if (document.getElementById('typing-indicator')) return;
-    const area = document.getElementById('messages-area');
     const row  = document.createElement('div');
     row.className = 'msg-row received typing-indicator';
     row.id = 'typing-indicator';
     row.innerHTML = `<div class="msg-bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>`;
-    area.appendChild(row);
+    this.domCache.messagesArea.appendChild(row);
     this.scrollBottom();
   }
 
@@ -480,74 +508,92 @@ class ZapChat {
     document.getElementById('typing-indicator')?.remove();
   }
 
-  // ─── CHAT LIST ────────────────────────────────────────────────────────────
+  // ─── CHAT LIST MANAGEMENT ─────────────────────────────────────────────────
   updateChatListItem(username) {
-    // Update in contacts section
-    const contactEl = document.querySelector(`#contacts-section .contact-item[data-username="${username}"]`);
-    if (contactEl) {
-      const chat = this.chats.get(username);
-      const isOnline = this.onlineSet.has(username);
-      contactEl.querySelector('.c-avatar').className = `c-avatar ${isOnline ? 'online' : ''}`;
-      const lastEl = contactEl.querySelector('.c-last');
-      lastEl.className = `c-last ${chat?.typing ? 'typing' : ''}`;
-      lastEl.textContent = chat?.typing ? '✍️ typing…' : (chat?.lastMsg || 'Start a conversation');
-      const timeEl = contactEl.querySelector('.c-time');
-      timeEl.textContent = chat?.lastTime ? this.formatTime(chat.lastTime) : '';
-      const badge = contactEl.querySelector('.c-badge');
-      if (badge) badge.remove();
-      if (chat?.unread) {
-        const b = document.createElement('div');
-        b.className = 'c-badge';
-        b.textContent = chat.unread > 9 ? '9+' : chat.unread;
-        contactEl.querySelector('.c-meta').appendChild(b);
-      }
-    }
+    const chat = this.chats.get(username);
+    const isOnline = this.onlineSet.has(username);
 
-    // Update in chats section
-    const chatsEl = document.querySelector(`#chats-section .contact-item[data-username="${username}"]`);
-    if (chatsEl) chatsEl.remove();
+    // Update inside target list compartments
+    const containers = [this.domCache.chatsSection, document.getElementById('contacts-section')];
+    
+    containers.forEach(container => {
+      if (!container) return;
+      const item = container.querySelector(`.contact-item[data-username="${username}"]`);
+      if (item) {
+        const avatar = item.querySelector('.c-avatar');
+        if (avatar) avatar.className = `c-avatar ${isOnline ? 'online' : ''}`;
+        
+        const lastEl = item.querySelector('.c-last');
+        if (lastEl) {
+          lastEl.className = `c-last ${chat?.typing ? 'typing' : ''}`;
+          lastEl.textContent = chat?.typing ? '✍️ typing…' : (chat?.lastMsg || 'Start a conversation');
+        }
+        
+        const timeEl = item.querySelector('.c-time');
+        if (timeEl) timeEl.textContent = chat?.lastTime ? this.formatTime(chat.lastTime) : '';
+        
+        const badge = item.querySelector('.c-badge');
+        if (badge) badge.remove();
+        if (chat?.unread) {
+          const b = document.createElement('div');
+          b.className = 'c-badge';
+          b.textContent = chat.unread > 9 ? '9+' : chat.unread;
+          item.querySelector('.c-meta')?.appendChild(b);
+        }
+      }
+    });
+
     this.upsertChatsSection(username);
   }
 
   upsertChatsSection(username) {
-    const section = document.getElementById('chats-section');
+    const section = this.domCache.chatsSection;
     const emptyState = section.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
 
-    // Remove old entry
-    section.querySelector(`[data-username="${username}"]`)?.remove();
+    // Check if an entry exists already inside the active chat history list layout
+    const existingEntry = section.querySelector(`.contact-item[data-username="${username}"]`);
+    
+    if (existingEntry) {
+      // If it's already at the very top, don't move it unnecessarily
+      if (section.firstChild === existingEntry) return;
+      existingEntry.remove();
+    }
 
-    const user = { username };
-    const el = this.createContactEl(user, true);
-
-    // Prepend
-    section.insertBefore(el, section.firstChild);
+    const el = this.createContactEl({ username }, true);
+    section.insertBefore(el, section.firstChild); // Prepend to top of dashboard list
   }
 
   // ─── EMOJI ───────────────────────────────────────────────────────────────
   buildEmojiPicker() {
-    const picker = document.getElementById('emoji-picker');
+    const picker = this.domCache.emojiPicker;
+    const fragment = document.createDocumentFragment();
+    
     EMOJIS.forEach(em => {
       const btn = document.createElement('span');
       btn.className = 'emoji-btn-item';
       btn.textContent = em;
       btn.addEventListener('click', e => {
         e.stopPropagation();
-        const input = document.getElementById('message-input');
+        const input = this.domCache.messageInput;
         input.value += em;
         input.focus();
-        document.getElementById('emoji-picker').classList.add('hidden');
+        picker.classList.add('hidden');
       });
-      picker.appendChild(btn);
+      fragment.appendChild(btn);
     });
+    picker.appendChild(fragment);
   }
 
   // ─── TOASTS ──────────────────────────────────────────────────────────────
   showToast(title, body, type = 'message') {
     const container = document.querySelector('.toast-container');
+    if (!container) return;
+    
     const toast = document.createElement('div');
     toast.className = 'toast';
     if (type === 'error') toast.style.borderLeftColor = 'var(--danger)';
+    
     toast.innerHTML = `<div class="toast-title">${this.escHtml(title)}</div><div class="toast-body">${this.escHtml(body.substring(0, 60))}</div>`;
     container.appendChild(toast);
     setTimeout(() => toast.remove(), 4200);
@@ -555,15 +601,17 @@ class ZapChat {
 
   // ─── UTILS ───────────────────────────────────────────────────────────────
   scrollBottom() {
-    const area = document.getElementById('messages-area');
+    const area = this.domCache.messagesArea;
+    // requestAnimationFrame synchronizes execution matching device refreshes
     requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
   }
 
   formatTime(iso) {
     const d = new Date(iso);
     const now = new Date();
-    const isToday = d.toDateString() === now.toDateString();
-    if (isToday) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (d.toDateString() === now.toDateString()) {
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
 
