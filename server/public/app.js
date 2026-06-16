@@ -1,28 +1,48 @@
 /* ═══════════════════════════════════════════
    ZapChat – Client App
+   Dynamic origin routing for Back4app + local dev
    ═══════════════════════════════════════════ */
 
-const API = 'https://zapchat-server.vercel.app';
+// ─── Dynamic Server Origin ───────────────────────────────────────────────────
+// Automatically resolves to the correct backend:
+//   Production (Back4app):  https://echochat-fvq5kwvs.b4a.run
+//   Same-origin fallback:   window.location.origin  (Vercel / localhost)
+const PROD_ORIGIN = 'https://echochat-fvq5kwvs.b4a.run';
+const API = (
+  window.location.hostname === 'echochat-fvq5kwvs.b4a.run' ||
+  window.location.hostname.endsWith('.b4a.run')
+) ? PROD_ORIGIN : window.location.origin;
+
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
 class ZapChat {
   constructor() {
-    this.socket    = null;
-    this.token     = localStorage.getItem('zc_token');
-    this.user      = JSON.parse(localStorage.getItem('zc_user') || 'null');
-    this.activeChat = null;      // username of current chat partner
-    this.chats     = new Map();  // username → { messages[], unread, lastMsg, lastTime, typing }
-    this.onlineSet = new Set();
+    this.socket      = null;
+    this.token       = localStorage.getItem('zc_token');
+    this.user        = JSON.parse(localStorage.getItem('zc_user') || 'null');
+    this.activeChat  = null;
+    this.chats       = new Map();
+    this.onlineSet   = new Set();
     this.typingTimer = null;
-    this.isTyping  = false;
+    this.isTyping    = false;
+
+    // ─── DOM Cache ─────────────────────────────────────────────────────────
+    // Pre-caching frequent nodes eliminates repeated querySelector calls and
+    // prevents layout-reflow cycles in hot message-render paths.
+    this.domCache = {};
 
     this.bindAuthUI();
     if (this.token && this.user) this.boot();
   }
 
-  // ─── AUTH ───────────────────────────────────────────────────────────────
+  // ─── DOM Cache Accessor ─────────────────────────────────────────────────
+  dom(id) {
+    if (!this.domCache[id]) this.domCache[id] = document.getElementById(id);
+    return this.domCache[id];
+  }
+
+  // ─── AUTH ────────────────────────────────────────────────────────────────
   bindAuthUI() {
-    // Tab switching
     document.querySelectorAll('.auth-tab').forEach(tab => {
       tab.addEventListener('click', () => {
         const which = tab.dataset.tab;
@@ -30,16 +50,12 @@ class ZapChat {
         tab.classList.add('active');
         document.querySelectorAll('.auth-panel').forEach(p => p.classList.remove('active'));
         document.getElementById(which + '-panel').classList.add('active');
-        const slider = document.querySelector('.auth-tab-slider');
-        slider.classList.toggle('right', which === 'register');
+        document.querySelector('.auth-tab-slider').classList.toggle('right', which === 'register');
       });
     });
 
-    // Login
     document.getElementById('login-btn').addEventListener('click', () => this.login());
     document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') this.login(); });
-
-    // Register
     document.getElementById('register-btn').addEventListener('click', () => this.register());
     document.getElementById('reg-password').addEventListener('keydown', e => { if (e.key === 'Enter') this.register(); });
   }
@@ -47,13 +63,13 @@ class ZapChat {
   async login() {
     const username = document.getElementById('login-username').value.trim();
     const password = document.getElementById('login-password').value;
-    const errEl = document.getElementById('login-error');
+    const errEl    = document.getElementById('login-error');
     errEl.textContent = '';
     if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
     const btn = document.getElementById('login-btn');
     btn.style.opacity = '0.6';
     try {
-      const res = await fetch(`${API}/api/login`, {
+      const res  = await fetch(`${API}/api/login`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
@@ -62,19 +78,19 @@ class ZapChat {
       this.saveSession(data.token, data.user);
       this.boot();
     } catch { errEl.textContent = 'Cannot connect to server.'; }
-    finally { btn.style.opacity = '1'; }
+    finally   { btn.style.opacity = '1'; }
   }
 
   async register() {
     const username = document.getElementById('reg-username').value.trim();
     const password = document.getElementById('reg-password').value;
-    const errEl = document.getElementById('register-error');
+    const errEl    = document.getElementById('register-error');
     errEl.textContent = '';
     if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
     const btn = document.getElementById('register-btn');
     btn.style.opacity = '0.6';
     try {
-      const res = await fetch(`${API}/api/register`, {
+      const res  = await fetch(`${API}/api/register`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
@@ -83,7 +99,7 @@ class ZapChat {
       this.saveSession(data.token, data.user);
       this.boot();
     } catch { errEl.textContent = 'Cannot connect to server.'; }
-    finally { btn.style.opacity = '1'; }
+    finally   { btn.style.opacity = '1'; }
   }
 
   saveSession(token, user) {
@@ -97,6 +113,7 @@ class ZapChat {
     localStorage.removeItem('zc_token');
     localStorage.removeItem('zc_user');
     if (this.socket) this.socket.disconnect();
+    this.domCache = {};
     location.reload();
   }
 
@@ -105,56 +122,46 @@ class ZapChat {
     document.getElementById('auth-screen').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
 
-    // Set my avatar
-    document.getElementById('me-avatar').textContent = this.user.username.charAt(0).toUpperCase();
-    document.getElementById('me-name').textContent = this.user.username;
-
-    // Logout
-    document.getElementById('logout-btn').addEventListener('click', () => {
-      if (confirm('Sign out?')) this.logout();
+    // Prime the DOM cache for all hot-path nodes immediately after mount
+    ['messages-area','message-input','chat-name','chat-avatar','chat-status',
+     'chat-empty','active-chat','users-list','chats-section','contacts-section',
+     'search-input','me-name','me-avatar'].forEach(id => {
+      this.domCache[id] = document.getElementById(id);
     });
 
-    // Sidebar tabs
+    if (this.domCache['me-name'])   this.domCache['me-name'].textContent   = this.user.username;
+    if (this.domCache['me-avatar']) this.domCache['me-avatar'].textContent = this.user.username.charAt(0).toUpperCase();
+
+    document.getElementById('logout-btn').addEventListener('click', () => this.logout());
+    document.getElementById('back-btn').addEventListener('click', () => this.closeChatMobile());
+    document.getElementById('send-btn').addEventListener('click', () => this.sendMessage());
+
+    const input = this.dom('message-input');
+    input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.sendMessage(); } });
+    input.addEventListener('input', () => this.onInputChange());
+
+    this.dom('search-input').addEventListener('input', e => this.filterContacts(e.target.value));
+
     document.querySelectorAll('.s-tab').forEach(tab => {
       tab.addEventListener('click', () => {
         document.querySelectorAll('.s-tab').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
-        const sec = tab.dataset.section;
-        document.getElementById('chats-section').classList.toggle('hidden', sec !== 'chats');
-        document.getElementById('contacts-section').classList.toggle('hidden', sec !== 'contacts');
+        document.getElementById('chats-section').classList.toggle('hidden', tab.dataset.section !== 'chats');
+        document.getElementById('contacts-section').classList.toggle('hidden', tab.dataset.section !== 'contacts');
       });
     });
 
-    // Search
-    document.getElementById('search-input').addEventListener('input', e => this.filterContacts(e.target.value));
-
-    // Message input
-    const input = document.getElementById('message-input');
-    input.addEventListener('input', () => this.onInputChange());
-    input.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.sendMessage(); }
-    });
-
-    // Send button
-    document.getElementById('send-btn').addEventListener('click', () => this.sendMessage());
-
-    // Back button (mobile)
-    document.getElementById('back-btn').addEventListener('click', () => this.closeChatMobile());
-
-    // Emoji
     document.querySelector('.emoji-btn').addEventListener('click', e => {
       e.stopPropagation();
-      const picker = document.getElementById('emoji-picker');
-      picker.classList.toggle('hidden');
-      if (!picker.children.length) this.buildEmojiPicker();
+      document.getElementById('emoji-picker').classList.toggle('hidden');
     });
-    document.addEventListener('click', () => document.getElementById('emoji-picker').classList.add('hidden'));
+    document.addEventListener('click', () => document.getElementById('emoji-picker')?.classList.add('hidden'));
 
-    // Toast container
     const toasts = document.createElement('div');
     toasts.className = 'toast-container';
     document.body.appendChild(toasts);
 
+    this.buildEmojiPicker();
     this.connectSocket();
     this.fetchUsers();
   }
@@ -162,25 +169,25 @@ class ZapChat {
   // ─── SOCKET ──────────────────────────────────────────────────────────────
   connectSocket() {
     this.socket = io(API, {
-      auth: { token: this.token },
-      transports: ['polling'],
+      auth:                 { token: this.token },
+      // WebSocket first, polling fallback — critical for Back4app reverse-proxy
+      transports:           ['websocket', 'polling'],
       reconnectionAttempts: 10,
-      reconnectionDelay: 2000,
-      timeout: 20000
+      reconnectionDelay:    2000,
+      timeout:              20000,
+      withCredentials:      true,
     });
 
     this.socket.on('connect', () => {
-      console.log('🟢 Socket connected');
+      console.log('Socket connected via', this.socket.io.engine.transport.name);
     });
 
     this.socket.on('connect_error', err => {
-      console.error('Socket error:', err.message);
+      console.error('Socket connect_error:', err.message);
       this.showToast('Connection Error', 'Could not connect to server.', 'error');
     });
 
-    this.socket.on('disconnect', () => {
-      console.log('🔴 Socket disconnected');
-    });
+    this.socket.on('disconnect', reason => console.log('Socket disconnected:', reason));
 
     this.socket.on('online_users', users => {
       this.onlineSet = new Set(users);
@@ -189,165 +196,138 @@ class ZapChat {
 
     this.socket.on('user_status', ({ username, online }) => {
       if (online) this.onlineSet.add(username);
-      else this.onlineSet.delete(username);
+      else         this.onlineSet.delete(username);
       this.refreshOnlineStatus();
-      if (username === this.activeChat) {
-        document.getElementById('chat-status').textContent = online ? '🟢 Online' : '🔒 Encrypted';
-      }
+      if (username === this.activeChat)
+        this.dom('chat-status').textContent = online ? '🟢 Online' : '🔒 Encrypted';
     });
 
-    this.socket.on('private_message', (msg) => {
-      this.receiveMessage(msg);
-    });
-
-    this.socket.on('message_sent', (msg) => {
-      this.onMessageSent(msg);
-    });
+    this.socket.on('private_message', msg => this.receiveMessage(msg));
+    this.socket.on('message_sent',    msg => this.onMessageSent(msg));
 
     this.socket.on('typing_start', ({ from }) => {
-      if (!this.chats.has(from)) this.ensureChat(from);
+      if (!this.chats.has(from)) return;
       this.chats.get(from).typing = true;
       this.updateChatListItem(from);
       if (this.activeChat === from) this.showTypingIndicator();
     });
 
     this.socket.on('typing_stop', ({ from }) => {
-      if (this.chats.has(from)) this.chats.get(from).typing = false;
+      if (!this.chats.has(from)) return;
+      this.chats.get(from).typing = false;
       this.updateChatListItem(from);
       if (this.activeChat === from) this.removeTypingIndicator();
     });
 
     this.socket.on('messages_read', ({ by }) => {
-      if (this.chats.has(by)) {
-        const msgs = this.chats.get(by).messages;
-        msgs.forEach(m => { if (m.from === this.user.username) m.status = 'read'; });
-        if (this.activeChat === by) this.updateReadStatuses();
-      }
+      if (this.activeChat === by) this.updateReadStatuses();
     });
   }
 
-  // ─── USERS / CONTACTS ────────────────────────────────────────────────────
+  // ─── USERS ───────────────────────────────────────────────────────────────
   async fetchUsers() {
     try {
-      const res = await fetch(`${API}/api/users`, {
+      const res   = await fetch(`${API}/api/users`, {
         headers: { Authorization: `Bearer ${this.token}` }
       });
       const users = await res.json();
-      this.renderContacts(users);
-    } catch {}
+      this.renderUserList(users);
+    } catch (e) { console.error('fetchUsers error:', e); }
   }
 
-  renderContacts(users) {
-    const list = document.getElementById('users-list');
+  renderUserList(users) {
+    const list = this.dom('users-list');
+    // DocumentFragment batches all contact insertions → single DOM reflow
+    const frag = document.createDocumentFragment();
+    users.forEach(u => frag.appendChild(this.createContactEl(u)));
     list.innerHTML = '';
-    if (!users.length) {
-      list.innerHTML = '<div class="empty-state"><i class="fas fa-user-slash"></i><p>No other users yet.</p></div>';
-      return;
-    }
-    users.forEach(u => {
-      if (this.onlineSet.has(u.username)) u.online = true;
-      list.appendChild(this.createContactEl(u, false));
-    });
+    list.appendChild(frag);
   }
 
-  createContactEl(user, isChatItem = false) {
-    const div = document.createElement('div');
-    div.className = 'contact-item';
-    div.dataset.username = user.username;
-
+  createContactEl(user, fromChat = false) {
+    const chat     = this.chats.get(user.username);
     const isOnline = this.onlineSet.has(user.username);
-    const chatData = this.chats.get(user.username);
-    const lastMsg  = chatData?.lastMsg || user.status || 'Start a conversation';
-    const lastTime = chatData?.lastTime || '';
-    const unread   = chatData?.unread || 0;
-    const typing   = chatData?.typing || false;
-
-    div.innerHTML = `
-      <div class="c-avatar ${isOnline ? 'online' : ''}">${user.username.charAt(0).toUpperCase()}</div>
+    const el       = document.createElement('div');
+    el.className       = 'contact-item';
+    el.dataset.username = user.username;
+    el.innerHTML = `
+      <div class="c-avatar ${isOnline ? 'online' : ''}">${(user.username||'?').charAt(0).toUpperCase()}</div>
       <div class="c-info">
-        <div class="c-name">${user.username}</div>
-        <div class="c-last ${typing ? 'typing' : ''}">${typing ? '✍️ typing…' : this.escHtml(lastMsg)}</div>
-      </div>
-      <div class="c-meta">
-        <div class="c-time">${lastTime ? this.formatTime(lastTime) : ''}</div>
-        ${unread ? `<div class="c-badge">${unread > 9 ? '9+' : unread}</div>` : ''}
-      </div>
-    `;
-    div.addEventListener('click', () => this.openChat(user.username));
-    return div;
+        <div class="c-top">
+          <span class="c-name">${this.escHtml(user.username)}</span>
+          <span class="c-time">${chat?.lastTime ? this.formatTime(chat.lastTime) : ''}</span>
+        </div>
+        <div class="c-bottom">
+          <span class="c-last ${chat?.typing ? 'typing' : ''}">${
+            chat?.typing ? '✍️ typing…' : (chat?.lastMsg ? this.escHtml(chat.lastMsg) : 'Start a conversation')
+          }</span>
+          ${chat?.unread ? `<div class="c-meta"><div class="c-badge">${chat.unread > 9 ? '9+' : chat.unread}</div></div>` : ''}
+        </div>
+      </div>`;
+    el.addEventListener('click', () => this.openChat(user.username));
+    return el;
   }
 
   refreshOnlineStatus() {
     document.querySelectorAll('.contact-item').forEach(el => {
-      const un = el.dataset.username;
-      el.querySelector('.c-avatar').classList.toggle('online', this.onlineSet.has(un));
+      const av = el.querySelector('.c-avatar');
+      if (av) av.classList.toggle('online', this.onlineSet.has(el.dataset.username));
     });
   }
 
   filterContacts(q) {
     document.querySelectorAll('.contact-item').forEach(el => {
-      const name = el.dataset.username?.toLowerCase() || '';
-      el.style.display = name.includes(q.toLowerCase()) ? '' : 'none';
+      el.style.display = (el.dataset.username||'').toLowerCase().includes(q.toLowerCase()) ? '' : 'none';
     });
   }
 
   ensureChat(username) {
-    if (!this.chats.has(username)) {
+    if (!this.chats.has(username))
       this.chats.set(username, { messages: [], unread: 0, lastMsg: '', lastTime: '', typing: false });
-    }
   }
 
   // ─── OPEN / CLOSE CHAT ───────────────────────────────────────────────────
   async openChat(username) {
     this.activeChat = username;
     this.ensureChat(username);
-
-    // Reset unread
     this.chats.get(username).unread = 0;
     this.socket.emit('mark_read', { from: username });
 
-    // Update UI
-    document.getElementById('chat-name').textContent = username;
-    document.getElementById('chat-avatar').textContent = username.charAt(0).toUpperCase();
-    const isOnline = this.onlineSet.has(username);
-    document.getElementById('chat-status').textContent = isOnline ? '🟢 Online' : '🔒 Encrypted';
+    this.dom('chat-name').textContent   = username;
+    this.dom('chat-avatar').textContent = username.charAt(0).toUpperCase();
+    this.dom('chat-status').textContent = this.onlineSet.has(username) ? '🟢 Online' : '🔒 Encrypted';
+    this.dom('chat-empty').classList.add('hidden');
+    this.dom('active-chat').classList.remove('hidden');
 
-    document.getElementById('chat-empty').classList.add('hidden');
-    document.getElementById('active-chat').classList.remove('hidden');
-
-    // Mobile: slide in
     document.querySelector('.chat-panel').classList.add('visible');
     document.querySelector('.sidebar').classList.add('hidden-mobile');
-
-    // Active highlight in list
     document.querySelectorAll('.contact-item').forEach(el => {
       el.classList.toggle('active', el.dataset.username === username);
     });
 
-    // Load messages
-    const msgArea = document.getElementById('messages-area');
+    const msgArea = this.dom('messages-area');
     msgArea.innerHTML = '<div class="messages-date-divider"><span>Today</span></div>';
 
-    // Fetch history
     try {
-      const res = await fetch(`${API}/api/messages/${username}`, {
+      const res     = await fetch(`${API}/api/messages/${username}`, {
         headers: { Authorization: `Bearer ${this.token}` }
       });
       const history = await res.json();
-      const chat = this.chats.get(username);
-      chat.messages = history;
-      history.forEach(m => this.renderMessage(m));
+      // DocumentFragment → single reflow for entire history batch
+      const frag = document.createDocumentFragment();
+      this.chats.get(username).messages = history;
+      history.forEach(m => frag.appendChild(this.buildMessageNode(m)));
+      msgArea.appendChild(frag);
     } catch {
-      this.chats.get(username).messages.forEach(m => this.renderMessage(m));
+      const frag = document.createDocumentFragment();
+      this.chats.get(username).messages.forEach(m => frag.appendChild(this.buildMessageNode(m)));
+      msgArea.appendChild(frag);
     }
 
     this.scrollBottom();
-    document.getElementById('message-input').focus();
-
-    // Remove typing indicator
+    this.dom('message-input').focus();
     this.removeTypingIndicator();
     if (this.chats.get(username).typing) this.showTypingIndicator();
-
     this.updateChatListItem(username);
   }
 
@@ -359,71 +339,56 @@ class ZapChat {
 
   // ─── MESSAGES ────────────────────────────────────────────────────────────
   sendMessage() {
-    const input = document.getElementById('message-input');
-    const text = input.value.trim();
+    const input = this.dom('message-input');
+    const text  = input.value.trim();
     if (!text || !this.activeChat) return;
-
     this.socket.emit('private_message', { to: this.activeChat, text });
-    input.value = '';
+    input.value        = '';
     input.style.height = 'auto';
-
-    // Stop typing
     this.stopTyping();
   }
 
   onMessageSent(msg) {
     this.ensureChat(msg.to);
-    const chat = this.chats.get(msg.to);
-    msg.status = 'sent';
+    const chat   = this.chats.get(msg.to);
+    msg.status   = 'sent';
     chat.messages.push(msg);
     chat.lastMsg  = msg.text;
     chat.lastTime = msg.timestamp;
-
-    if (this.activeChat === msg.to) {
-      this.renderMessage(msg);
-      this.scrollBottom();
-    }
+    if (this.activeChat === msg.to) { this.renderMessage(msg); this.scrollBottom(); }
     this.updateChatListItem(msg.to);
     this.upsertChatsSection(msg.to);
   }
 
   receiveMessage(msg) {
     this.ensureChat(msg.from);
-    const chat = this.chats.get(msg.from);
-    msg.status = 'received';
+    const chat   = this.chats.get(msg.from);
+    msg.status   = 'received';
     chat.messages.push(msg);
     chat.lastMsg  = msg.text;
     chat.lastTime = msg.timestamp;
-
     if (this.activeChat === msg.from) {
       this.removeTypingIndicator();
       this.renderMessage(msg);
       this.scrollBottom();
-      // mark as read immediately
       this.socket.emit('mark_read', { from: msg.from });
     } else {
       chat.unread = (chat.unread || 0) + 1;
       this.showToast(msg.from, msg.text);
     }
-
     this.updateChatListItem(msg.from);
     this.upsertChatsSection(msg.from);
   }
 
-  renderMessage(msg) {
+  // Returns a detached DOM node — safe to batch inside DocumentFragment
+  buildMessageNode(msg) {
     const isSent = msg.from === this.user.username;
-    const area = document.getElementById('messages-area');
-
-    const row = document.createElement('div');
-    row.className = `msg-row ${isSent ? 'sent' : 'received'}`;
+    const row    = document.createElement('div');
+    row.className  = `msg-row ${isSent ? 'sent' : 'received'}`;
     row.dataset.id = msg.id;
-
     const statusIcon = isSent
-      ? `<span class="msg-status ${msg.status || 'sent'}">
-           ${msg.status === 'read' ? '✓✓' : msg.status === 'delivered' ? '✓✓' : '✓'}
-         </span>`
+      ? `<span class="msg-status ${msg.status||'sent'}">${msg.status==='read'||msg.status==='delivered'?'✓✓':'✓'}</span>`
       : '';
-
     row.innerHTML = `
       <div class="msg-bubble">
         <div class="msg-text">${this.escHtml(msg.text)}</div>
@@ -431,154 +396,123 @@ class ZapChat {
           <span class="msg-time">${this.formatTime(msg.timestamp)}</span>
           ${statusIcon}
         </div>
-      </div>
-    `;
-    area.appendChild(row);
+      </div>`;
+    return row;
+  }
+
+  renderMessage(msg) {
+    this.dom('messages-area').appendChild(this.buildMessageNode(msg));
   }
 
   updateReadStatuses() {
     document.querySelectorAll('.msg-row.sent .msg-status').forEach(el => {
-      el.className = 'msg-status read';
-      el.textContent = '✓✓';
+      el.className = 'msg-status read'; el.textContent = '✓✓';
     });
   }
 
   // ─── TYPING ──────────────────────────────────────────────────────────────
   onInputChange() {
-    const input = document.getElementById('message-input');
-    // Auto-resize
+    const input = this.dom('message-input');
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-
     if (!this.activeChat) return;
-    if (!this.isTyping) {
-      this.isTyping = true;
-      this.socket.emit('typing_start', { to: this.activeChat });
-    }
+    if (!this.isTyping) { this.isTyping = true; this.socket.emit('typing_start', { to: this.activeChat }); }
     clearTimeout(this.typingTimer);
     this.typingTimer = setTimeout(() => this.stopTyping(), 2500);
   }
 
   stopTyping() {
-    if (this.isTyping && this.activeChat) {
-      this.isTyping = false;
-      this.socket.emit('typing_stop', { to: this.activeChat });
-    }
+    if (this.isTyping && this.activeChat) { this.isTyping = false; this.socket.emit('typing_stop', { to: this.activeChat }); }
     clearTimeout(this.typingTimer);
   }
 
   showTypingIndicator() {
     if (document.getElementById('typing-indicator')) return;
-    const area = document.getElementById('messages-area');
-    const row  = document.createElement('div');
-    row.className = 'msg-row received typing-indicator';
-    row.id = 'typing-indicator';
+    const row = document.createElement('div');
+    row.className = 'msg-row received typing-indicator'; row.id = 'typing-indicator';
     row.innerHTML = `<div class="msg-bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>`;
-    area.appendChild(row);
+    this.dom('messages-area').appendChild(row);
     this.scrollBottom();
   }
 
-  removeTypingIndicator() {
-    document.getElementById('typing-indicator')?.remove();
-  }
+  removeTypingIndicator() { document.getElementById('typing-indicator')?.remove(); }
 
   // ─── CHAT LIST ────────────────────────────────────────────────────────────
   updateChatListItem(username) {
-    // Update in contacts section
     const contactEl = document.querySelector(`#contacts-section .contact-item[data-username="${username}"]`);
     if (contactEl) {
       const chat = this.chats.get(username);
-      const isOnline = this.onlineSet.has(username);
-      contactEl.querySelector('.c-avatar').className = `c-avatar ${isOnline ? 'online' : ''}`;
+      contactEl.querySelector('.c-avatar').className = `c-avatar ${this.onlineSet.has(username) ? 'online' : ''}`;
       const lastEl = contactEl.querySelector('.c-last');
-      lastEl.className = `c-last ${chat?.typing ? 'typing' : ''}`;
+      lastEl.className  = `c-last ${chat?.typing ? 'typing' : ''}`;
       lastEl.textContent = chat?.typing ? '✍️ typing…' : (chat?.lastMsg || 'Start a conversation');
       const timeEl = contactEl.querySelector('.c-time');
-      timeEl.textContent = chat?.lastTime ? this.formatTime(chat.lastTime) : '';
-      const badge = contactEl.querySelector('.c-badge');
-      if (badge) badge.remove();
+      if (timeEl) timeEl.textContent = chat?.lastTime ? this.formatTime(chat.lastTime) : '';
+      contactEl.querySelector('.c-badge')?.remove();
       if (chat?.unread) {
-        const b = document.createElement('div');
-        b.className = 'c-badge';
+        const b = document.createElement('div'); b.className = 'c-badge';
         b.textContent = chat.unread > 9 ? '9+' : chat.unread;
-        contactEl.querySelector('.c-meta').appendChild(b);
+        contactEl.querySelector('.c-meta')?.appendChild(b);
       }
     }
-
-    // Update in chats section
-    const chatsEl = document.querySelector(`#chats-section .contact-item[data-username="${username}"]`);
-    if (chatsEl) chatsEl.remove();
+    document.querySelector(`#chats-section .contact-item[data-username="${username}"]`)?.remove();
     this.upsertChatsSection(username);
   }
 
   upsertChatsSection(username) {
-    const section = document.getElementById('chats-section');
-    const emptyState = section.querySelector('.empty-state');
-    if (emptyState) emptyState.remove();
-
-    // Remove old entry
+    const section = this.dom('chats-section');
+    section.querySelector('.empty-state')?.remove();
     section.querySelector(`[data-username="${username}"]`)?.remove();
-
-    const user = { username };
-    const el = this.createContactEl(user, true);
-
-    // Prepend
-    section.insertBefore(el, section.firstChild);
+    section.insertBefore(this.createContactEl({ username }, true), section.firstChild);
   }
 
   // ─── EMOJI ───────────────────────────────────────────────────────────────
   buildEmojiPicker() {
     const picker = document.getElementById('emoji-picker');
+    // DocumentFragment → single reflow for all 30 emoji buttons
+    const frag   = document.createDocumentFragment();
     EMOJIS.forEach(em => {
       const btn = document.createElement('span');
-      btn.className = 'emoji-btn-item';
-      btn.textContent = em;
+      btn.className = 'emoji-btn-item'; btn.textContent = em;
       btn.addEventListener('click', e => {
         e.stopPropagation();
-        const input = document.getElementById('message-input');
-        input.value += em;
-        input.focus();
+        this.dom('message-input').value += em;
+        this.dom('message-input').focus();
         document.getElementById('emoji-picker').classList.add('hidden');
       });
-      picker.appendChild(btn);
+      frag.appendChild(btn);
     });
+    picker.appendChild(frag);
   }
 
   // ─── TOASTS ──────────────────────────────────────────────────────────────
   showToast(title, body, type = 'message') {
     const container = document.querySelector('.toast-container');
-    const toast = document.createElement('div');
+    const toast     = document.createElement('div');
     toast.className = 'toast';
     if (type === 'error') toast.style.borderLeftColor = 'var(--danger)';
-    toast.innerHTML = `<div class="toast-title">${this.escHtml(title)}</div><div class="toast-body">${this.escHtml(body.substring(0, 60))}</div>`;
+    toast.innerHTML = `<div class="toast-title">${this.escHtml(title)}</div><div class="toast-body">${this.escHtml(String(body).substring(0,60))}</div>`;
     container.appendChild(toast);
     setTimeout(() => toast.remove(), 4200);
   }
 
   // ─── UTILS ───────────────────────────────────────────────────────────────
   scrollBottom() {
-    const area = document.getElementById('messages-area');
+    const area = this.dom('messages-area');
     requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
   }
 
   formatTime(iso) {
-    const d = new Date(iso);
-    const now = new Date();
-    const isToday = d.toDateString() === now.toDateString();
-    if (isToday) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const d = new Date(iso), now = new Date();
+    if (d.toDateString() === now.toDateString())
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
 
   escHtml(str) {
-    return String(str)
-      .replace(/&/g,'&amp;')
-      .replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;')
-      .replace(/"/g,'&quot;');
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 }
 
 // Init
-window.addEventListener('DOMContentLoaded', () => {
-  window.app = new ZapChat();
-});
+window.addEventListener('DOMContentLoaded', () => { window.app = new ZapChat(); });
