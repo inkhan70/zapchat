@@ -16,11 +16,10 @@ const MONGODB_URI  = process.env.MONGODB_URI;
 
 // Metered Video SDK credentials.
 // App domain = the subdomain of your Metered app, e.g. "zapchat-server.metered.live".
-// Secret key = server-side only. Rotate via the Metered dashboard if leaked.
-// ⚠️  Fallback to literal secret for out-of-the-box dev; ALWAYS set the env
-//     var in production (Back4app "Environment Variables" tab).
+// Secret key = server-side only, loaded from env. Rotate via the Metered
+// dashboard if it's ever exposed (e.g. pasted into a chat, committed to git).
 const METERED_APP_DOMAIN = process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live';
-const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY || 'pRRJHzFIL4Zty_WaG1_Og5cPcLmVIl6jYfiOw8bZYeYPMaSE';
+const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY;
 const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 
 // Explicit allowed-origin list:
@@ -208,23 +207,22 @@ app.get('/api/messages/:with', async (req, res) => {
 // ─── REST: Metered Room Creation ─────────────────────────────────────────────
 // POST /api/create-room
 // Body (optional):
-//   { roomName?: string, privacy?: "public"|"private" }
+//   { roomName?: string, privacy?: "public"|"private", with?: string }
 //   - If roomName is omitted, a stable name is derived from the caller +
 //     the optional `with` field (sorted usernames) so the same chat always
-//     lands in the same room. This makes "the active chat context" map
-//     1-to-1 to a Metered room, as required.
+//     lands in the same room.
 //
 // Auth: requires a valid Bearer token (same pattern as /api/users, /api/messages).
-//
-// Server-to-server: this handler never exposes the secret key to the client.
-// It calls Metered's REST API and returns the sanitized room payload so the
-// front-end can call `meeting.join({ roomURL, name })`.
+// The secret key is never sent to the client — this route is the only place
+// that talks to Metered's REST API directly.
 app.post('/api/create-room', async (req, res) => {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
 
-  // Build a stable, URL-safe room identifier. A-Z 0-9 dashes only — Metered
-  // rejects anything else in `roomName`.
+  if (!METERED_SECRET_KEY) {
+    return res.status(500).json({ error: 'Metered secret key not configured on server.' });
+  }
+
   const withUser = (req.body && typeof req.body.with === 'string') ? req.body.with.trim() : '';
   const explicit = (req.body && typeof req.body.roomName === 'string') ? req.body.roomName.trim() : '';
   const roomName = (explicit
@@ -235,9 +233,8 @@ app.post('/api/create-room', async (req, res) => {
   const privacy = (req.body && req.body.privacy === 'private') ? 'private' : 'public';
 
   try {
-    // 1) Try to fetch the room first — Metered will return 404 if it doesn't
-    //    exist. If it does exist we reuse it (so a returning caller lands in
-    //    the same room as the original chat).
+    // 1) Try to fetch the room first — reuse it if it already exists so a
+    //    returning caller lands in the same room as the original chat.
     let room = null;
     try {
       const existing = await fetch(
@@ -256,14 +253,11 @@ app.post('/api/create-room', async (req, res) => {
           body: JSON.stringify({
             roomName,
             privacy,
-            // Group-friendly defaults — see https://www.metered.ca/docs/llms-video-sdk.txt
             autoJoin:              true,
             joinVideoOn:           true,
             joinAudioOn:           true,
             enableScreenSharing:   true,
             enableChat:            true,
-            // Don't auto-archive rooms just because they sit idle — chat rooms
-            // are long-lived conversation spaces.
             ejectAtRoomExp:        false,
           }),
         }
@@ -271,7 +265,6 @@ app.post('/api/create-room', async (req, res) => {
 
       const raw = await createRes.text();
       if (!createRes.ok) {
-        // Bubble up Metered's own error message for easier debugging.
         let detail = raw;
         try { detail = JSON.parse(raw).message || raw; } catch (_) { /* keep raw */ }
         console.error('❌ Metered create-room failed:', createRes.status, detail);
@@ -280,18 +273,13 @@ app.post('/api/create-room', async (req, res) => {
       room = JSON.parse(raw);
     }
 
-    // 3) Return a sanitized payload. The `roomURL` is what the SDK's
-    //    `meeting.join({ roomURL, name })` expects.
     return res.json({
       roomName:      room.roomName,
       roomId:        room._id,
       privacy:       room.privacy,
-      // Full subdomain path the SDK consumes:
       roomURL:       `${METERED_APP_DOMAIN}/${room.roomName}`,
       appDomain:     METERED_APP_DOMAIN,
-      // Hint for the client to display the public room URL.
       publicURL:     `https://${METERED_APP_DOMAIN}/${room.roomName}`,
-      // The active chat context that produced this room — useful for logging.
       context:       withUser ? { self: decoded.username, with: withUser } : null,
     });
   } catch (err) {
@@ -319,14 +307,10 @@ app.get('*', (_req, res) => {
 // ─── Socket.io ───────────────────────────────────────────────────────────────
 const io = new Server(server, {
   cors: {
-    // Explicit origins array — Back4app reverse-proxy requires a concrete list,
-    // not a wildcard, when credentials: true is set.
     origin:      ALLOWED_ORIGINS,
     methods:     ['GET', 'POST'],
     credentials: true,
   },
-  // Declare both transports explicitly so the engine doesn't silently drop
-  // WebSocket upgrade attempts behind Back4app's Nginx proxy.
   transports:    ['websocket', 'polling'],
   pingTimeout:   30000,
   pingInterval:  15000,
@@ -362,7 +346,6 @@ io.on('connection', socket => {
     const roomId = getRoomId(username, to);
 
     if (useDB()) {
-      // Fire-and-forget — don't await so real-time delivery isn't delayed by DB write
       MessageModel.create({ ...msg, roomId }).catch(err => console.error('DB save error:', err));
     } else {
       if (!messages.has(roomId)) messages.set(roomId, []);
@@ -396,6 +379,46 @@ io.on('connection', socket => {
     }
     const senderSocket = onlineUsers.get(from);
     if (senderSocket) io.to(senderSocket).emit('messages_read', { by: username });
+  });
+
+  // ─── CALL SIGNALING ─────────────────────────────────────────────────────
+  // None of this touches Metered directly — it just relays "ring", "accept",
+  // "reject", and "hang up" between the two browsers over the socket they
+  // already have open. The actual audio/video happens once both sides call
+  // meeting.join() on the room created via /api/create-room.
+  socket.on('call_invite', ({ to, callType, roomURL, roomName }) => {
+    const targetSocket = onlineUsers.get(to);
+    if (!targetSocket) {
+      socket.emit('call_failed', { reason: 'User is offline' });
+      return;
+    }
+    io.to(targetSocket).emit('call_invite', {
+      from: username,
+      callType,   // 'audio' | 'video'
+      roomURL,
+      roomName,
+    });
+  });
+
+  socket.on('call_accept', ({ to, roomURL, roomName }) => {
+    const callerSocket = onlineUsers.get(to);
+    if (callerSocket) {
+      io.to(callerSocket).emit('call_accepted', { from: username, roomURL, roomName });
+    }
+  });
+
+  socket.on('call_reject', ({ to }) => {
+    const callerSocket = onlineUsers.get(to);
+    if (callerSocket) {
+      io.to(callerSocket).emit('call_rejected', { from: username });
+    }
+  });
+
+  socket.on('call_end', ({ to }) => {
+    const otherSocket = onlineUsers.get(to);
+    if (otherSocket) {
+      io.to(otherSocket).emit('call_ended', { from: username });
+    }
   });
 
   socket.on('disconnect', reason => {
