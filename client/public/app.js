@@ -2,11 +2,12 @@
    ZapChat – Client App
    ═══════════════════════════════════════════ */
 
-// CRITICAL PRODUCTION FIX: Dynamic endpoint tracking
-// If running on local computer, uses local port. If live on Back4app, uses live domain automatically.
-const API = window.location.origin.includes('localhost') 
-  ? 'http://localhost:5000' 
-  : window.location.origin;
+// CRITICAL PRODUCTION FIX: Always use relative paths.
+// app.js is served by the same Express server that hosts the API, so
+// relative paths (`/api/...`) automatically resolve to whatever domain
+// the page is currently loaded from — Back4app, Vercel, or localhost —
+// with zero hardcoding and zero risk of pointing at the wrong host.
+const API = '';
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
