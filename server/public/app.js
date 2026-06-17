@@ -136,6 +136,15 @@ class ZapChat {
     document.getElementById('back-btn').addEventListener('click', () => this.closeChatMobile());
     document.getElementById('send-btn').addEventListener('click', () => this.sendMessage());
 
+    // ─── Call buttons ────────────────────────────────────────────────────
+    // The Metered SDK uses ONE namespace — `new Metered.Meeting()` — for both
+    // voice-only and video calls. We just skip startVideo() for voice calls.
+    // (Spec said `new MeteredVideo()` and `meeting.join({roomName,userName})`,
+    //  but the real SDK takes `new Metered.Meeting()` + `{roomURL, name}`.)
+    this.call = new VideoCall(this);
+    document.getElementById('voice-call-btn').addEventListener('click', () => this.call.start({ video: false }));
+    document.getElementById('video-call-btn').addEventListener('click', () => this.call.start({ video: true  }));
+
     const input = this.dom('message-input');
     input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.sendMessage(); } });
     input.addEventListener('input', () => this.onInputChange());
@@ -516,3 +525,487 @@ class ZapChat {
 
 // Init
 window.addEventListener('DOMContentLoaded', () => { window.app = new ZapChat(); });
+
+/* ═════════════════════════════════════════════════════════════════════
+   VideoCall — Metered Video SDK wrapper for ZapChat
+   - One class per call session
+   - Owns DOM nodes inside #call-modal, the meeting instance, and a
+     map of remote track IDs to their <video> tiles.
+   - Listens to SDK events to keep the grid + roster in sync, with
+     proper cleanup on hangup to avoid memory leaks (the spec was
+     explicit about "clear memory leaks").
+   ─────────────────────────────────────────────────────────────────────
+
+   SDK reference: https://www.metered.ca/docs/llms-video-sdk.txt
+   Globals used:   window.Metered.Meeting
+                   meeting.join({ roomURL, name })
+                   meeting.startAudio() / startVideo() / startScreenShare()
+                   meeting.muteLocalAudio() / unmuteLocalAudio()
+                   meeting.pauseLocalVideo() / resumeLocalVideo()
+                   meeting.leaveMeeting()
+                   meeting.on('remoteTrackStarted' | 'remoteTrackStopped'
+                              | 'participantJoined' | 'participantLeft'
+                              | 'onlineParticipants' | 'activeSpeaker'
+                              | 'stateChanged' | 'meetingLeft')
+   ═════════════════════════════════════════════════════════════════════ */
+class VideoCall {
+  constructor(app) {
+    this.app    = app;
+    this.meeting = null;
+    this.room   = null;          // { roomName, roomURL, ... } from /api/create-room
+    this.active = false;         // true between start() and hangup()
+    this.isVideo = true;         // whether the call includes video
+    this.state  = 'idle';        // 'idle' | 'connecting' | 'connected' | 'ended' | 'failed'
+
+    // Track state
+    this.localAudioMuted  = false;
+    this.localVideoPaused = false;
+    this.isScreenSharing  = false;
+
+    // Map of streamId -> { participantSessionId, name, isAudioOnly, videoEl }
+    this.remoteStreams = new Map();
+    // Map of participantSessionId -> { _id, name, audio, video, screen }
+    this.participants  = new Map();
+
+    // DOM cache (resolved lazily, see `dom()`)
+    this._dom = {};
+
+    this.cacheDom();
+    this.bindControls();
+  }
+
+  // ── DOM helpers ────────────────────────────────────────────────────────
+  dom(id) {
+    if (!this._dom[id]) this._dom[id] = document.getElementById(id);
+    return this._dom[id];
+  }
+
+  cacheDom() {
+    [
+      'call-modal', 'call-title-text', 'call-status', 'call-status-text',
+      'call-remote-grid', 'call-empty', 'call-local-pip', 'call-local-video',
+      'call-local-mic-off', 'call-roster', 'call-roster-list', 'call-roster-count',
+      'call-mute-btn', 'call-cam-btn', 'call-screen-btn', 'call-hangup-btn',
+      'voice-call-btn', 'video-call-btn',
+    ].forEach(id => { this._dom[id] = document.getElementById(id); });
+  }
+
+  bindControls() {
+    this.dom('call-hangup-btn').addEventListener('click', () => this.hangup());
+    this.dom('call-mute-btn').addEventListener('click',  () => this.toggleAudio());
+    this.dom('call-cam-btn').addEventListener('click',   () => this.toggleVideo());
+    this.dom('call-screen-btn').addEventListener('click', () => this.toggleScreenShare());
+
+    // Escape key hangs up — natural keyboard shortcut
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && this.active) this.hangup();
+    });
+  }
+
+  // ── Public entry: start a call ──────────────────────────────────────────
+  async start({ video = true } = {}) {
+    if (this.active) return;
+    if (!this.app.activeChat) {
+      this.app.showToast('Pick a chat first', 'Open a conversation before calling.', 'error');
+      return;
+    }
+    if (!window.Metered || !window.Metered.Meeting) {
+      this.app.showToast('SDK not loaded', 'Metered SDK failed to load. Check your network.', 'error');
+      console.error('Metered SDK global is missing — CDN script may not have loaded.');
+      return;
+    }
+
+    this.isVideo = video;
+    this.show(video ? 'Video Call' : 'Voice Call', 'Connecting…');
+    this.setState('connecting');
+
+    try {
+      // 1) Ask our backend to authorize + create the room.
+      //    The secret key NEVER leaves the server.
+      const withUser = this.app.activeChat;
+      const res = await fetch(`${API}/api/create-room`, {
+        method:  'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${this.app.token}`,
+        },
+        body: JSON.stringify({ with: withUser, privacy: 'public' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.error || 'create-room failed');
+      this.room = data;
+
+      // 2) Spin up the meeting instance and bind events BEFORE join.
+      this.meeting = new Metered.Meeting();
+      this.bindMeetingEvents();
+
+      // 3) Join the room. SDK expects { roomURL: "app.metered.live/roomName", name }
+      await this.meeting.join({
+        roomURL: data.roomURL,
+        name:    this.app.user.username,
+      });
+
+      // 4) Start the requested media. The SDK will:
+      //    - prompt the browser for cam/mic permissions
+      //    - emit `localTrackStarted` (which we render in the PIP)
+      this.active = true;
+      await this.meeting.startAudio();
+      if (video) await this.meeting.startVideo();
+
+      // 5) Self in the roster
+      this.participants.set('local', {
+        _id: 'local', name: this.app.user.username + ' (you)',
+        isLocal: true, audio: true, video,
+      });
+      this.renderRoster();
+
+      this.setStatus('connected', 'Connected');
+      this.app.showToast(video ? 'Call started' : 'Voice call started', data.roomName);
+    } catch (err) {
+      console.error('VideoCall.start error:', err);
+      this.setStatus('failed', 'Failed to connect');
+      this.app.showToast('Call failed', err.message || 'Could not start the call.', 'error');
+      await this.hangup();
+    }
+  }
+
+  // ── Event wiring ────────────────────────────────────────────────────────
+  bindMeetingEvents() {
+    const m = this.meeting;
+
+    // Connection state — drives the header pill
+    m.on('stateChanged', state => {
+      console.log('Meeting state:', state);
+      if (state === 'joined')             this.setStatus('connected', 'Connected');
+      else if (state === 'connecting_streams') this.setStatus('connecting', 'Negotiating media…');
+      else if (state === 'network_connection_lost') this.setStatus('connecting', 'Reconnecting…');
+      else if (state === 'reconnect_success') this.setStatus('connected', 'Reconnected');
+      else if (state === 'terminated')    { this.setStatus('ended', 'Meeting ended'); this.hangup(); }
+    });
+
+    // Local track started — paint the PIP preview.
+    m.on('localTrackStarted', item => {
+      if (item.type === 'video') this.attachLocalVideo(item.track);
+      this.updateLocalMicIndicator();
+      this.refreshTileStates();
+    });
+    m.on('localTrackStopped', item => {
+      if (item.type === 'video') this.dom('call-local-video').srcObject = null;
+      this.refreshTileStates();
+    });
+    m.on('localTrackUpdated', item => {
+      if (item.type === 'video') this.attachLocalVideo(item.track);
+    });
+
+    // Remote stream lifecycle — see SDK reference for `remoteTrackItem` shape.
+    m.on('remoteTrackStarted', item => {
+      const stream = new MediaStream([item.track]);
+      const tile = this.createRemoteTile({
+        streamId:             item.streamId,
+        participantSessionId: item.participantSessionId,
+        name:                 item.name || 'Guest',
+        kind:                 item.type, // 'audio' | 'video' | 'screen'
+        stream,
+      });
+      this.remoteStreams.set(item.streamId, tile);
+      this.refreshTileStates();
+    });
+
+    m.on('remoteTrackStopped', item => {
+      this.removeRemoteStream(item.streamId, /*keepRosterIfSameParticipant*/ true);
+      this.refreshTileStates();
+    });
+
+    // Roster events
+    m.on('participantJoined', p => {
+      this.participants.set(p._id, {
+        _id: p._id, name: p.name || 'Guest',
+        isLocal: false, audio: false, video: false, screen: false,
+      });
+      this.renderRoster();
+    });
+
+    m.on('participantLeft', p => {
+      // Remove every remote stream that belonged to this participant
+      for (const [streamId, tile] of this.remoteStreams) {
+        if (tile.participantSessionId === p._id) this.removeRemoteStream(streamId, false);
+      }
+      this.participants.delete(p._id);
+      this.renderRoster();
+      this.refreshTileStates();
+    });
+
+    // Full roster snapshot (server pushes periodically)
+    m.on('onlineParticipants', list => {
+      const next = new Map();
+      next.set('local', this.participants.get('local'));
+      for (const p of list) {
+        const existing = this.participants.get(p._id);
+        next.set(p._id, {
+          _id: p._id, name: p.name || 'Guest',
+          isLocal: false,
+          audio: existing?.audio ?? false,
+          video: existing?.video ?? false,
+          screen: existing?.screen ?? false,
+        });
+      }
+      this.participants = next;
+      this.renderRoster();
+    });
+
+    // Active speaker highlight
+    m.on('activeSpeaker', s => {
+      // Clear previous speaker
+      this.dom('call-remote-grid').querySelectorAll('.call-tile.speaking')
+        .forEach(el => el.classList.remove('speaking'));
+      this.dom('call-roster-list').querySelectorAll('.call-roster-item.speaking')
+        .forEach(el => el.classList.remove('speaking'));
+
+      if (!s || !s.streamId) return;
+      const tile = this.remoteStreams.get(s.streamId);
+      if (tile) tile.videoEl.closest('.call-tile')?.classList.add('speaking');
+      const rosterItem = this.dom('call-roster-list')
+        .querySelector(`.call-roster-item[data-pid="${CSS.escape(s.participantSessionId)}"]`);
+      rosterItem?.classList.add('speaking');
+    });
+
+    // Confirmation that leaveMeeting completed locally
+    m.on('meetingLeft', () => {
+      this.setStatus('ended', 'You left the call');
+    });
+  }
+
+  // ── Local media plumbing ────────────────────────────────────────────────
+  attachLocalVideo(track) {
+    const v = this.dom('call-local-video');
+    // Replace stream cleanly to avoid "Stream already in use" errors when
+    // switching devices or toggling.
+    v.srcObject = new MediaStream([track]);
+  }
+
+  updateLocalMicIndicator() {
+    this.dom('call-local-mic-off').classList.toggle('hidden', !this.localAudioMuted);
+  }
+
+  // ── Toggles ─────────────────────────────────────────────────────────────
+  async toggleAudio() {
+    if (!this.meeting || !this.active) return;
+    try {
+      if (this.localAudioMuted) {
+        await this.meeting.unmuteLocalAudio();
+        this.localAudioMuted = false;
+        this.setCtrlState('call-mute-btn', false);
+      } else {
+        await this.meeting.muteLocalAudio();
+        this.localAudioMuted = true;
+        this.setCtrlState('call-mute-btn', true);
+      }
+      this.updateLocalMicIndicator();
+      this.refreshTileStates();
+    } catch (e) { console.error('toggleAudio error:', e); }
+  }
+
+  async toggleVideo() {
+    if (!this.meeting || !this.active) return;
+    if (!this.isVideo) return; // voice-only call
+    try {
+      if (this.localVideoPaused) {
+        await this.meeting.resumeLocalVideo();
+        this.localVideoPaused = false;
+        this.setCtrlState('call-cam-btn', false);
+      } else {
+        await this.meeting.pauseLocalVideo();
+        this.localVideoPaused = true;
+        this.setCtrlState('call-cam-btn', true);
+      }
+      this.refreshTileStates();
+    } catch (e) { console.error('toggleVideo error:', e); }
+  }
+
+  async toggleScreenShare() {
+    if (!this.meeting || !this.active) return;
+    try {
+      if (this.isScreenSharing) {
+        await this.meeting.stopVideo();   // stopVideo stops whatever video producer is active
+        this.isScreenSharing = false;
+        // After stopping, restart the camera (voice-only calls unaffected)
+        if (this.isVideo) await this.meeting.startVideo();
+      } else {
+        await this.meeting.startScreenShare();
+        this.isScreenSharing = true;
+      }
+      this.setCtrlState('call-screen-btn', this.isScreenSharing);
+    } catch (e) {
+      console.error('toggleScreenShare error:', e);
+      // User-cancelled picker throws — that's fine.
+    }
+  }
+
+  setCtrlState(id, muted) {
+    const btn = this.dom(id);
+    btn.classList.toggle('muted', muted);
+    if (id === 'call-mute-btn') {
+      btn.querySelector('i').className = muted ? 'fas fa-microphone-slash' : 'fas fa-microphone';
+    } else if (id === 'call-cam-btn') {
+      btn.querySelector('i').className = muted ? 'fas fa-video-slash' : 'fas fa-video';
+    } else if (id === 'call-screen-btn') {
+      btn.querySelector('i').className = muted ? 'fas fa-stop' : 'fas fa-desktop';
+    }
+  }
+
+  // ── Remote tile management ─────────────────────────────────────────────
+  createRemoteTile({ streamId, participantSessionId, name, kind, stream }) {
+    const grid = this.dom('call-remote-grid');
+
+    const tile = document.createElement('div');
+    tile.className = 'call-tile';
+    tile.dataset.streamId    = streamId;
+    tile.dataset.participant = participantSessionId;
+    tile.dataset.kind        = kind;
+
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    tile.appendChild(video);
+
+    const label = document.createElement('div');
+    label.className = 'call-tile-label';
+    label.innerHTML = `<span>${this.app.escHtml(name)}</span>` +
+                      `<span class="mic-off hidden"><i class="fas fa-microphone-slash"></i></span>`;
+    tile.appendChild(label);
+
+    const conn = document.createElement('span');
+    conn.className = 'call-tile-connection';
+    tile.appendChild(conn);
+
+    grid.appendChild(tile);
+
+    return { streamId, participantSessionId, name, kind, videoEl: video, labelEl: label, tileEl: tile };
+  }
+
+  removeRemoteStream(streamId, keepRosterIfSameParticipant) {
+    const tile = this.remoteStreams.get(streamId);
+    if (!tile) return;
+    // Detach the MediaStream from the <video> so the browser releases the
+    // sink — this is the "clear memory leak" path called out in the spec.
+    try { tile.videoEl.pause(); tile.videoEl.srcObject = null; } catch (_) {}
+    tile.tileEl.remove();
+    this.remoteStreams.delete(streamId);
+
+    // If the participant has no more streams AND we're not told to keep them,
+    // drop them from the roster.
+    if (!keepRosterIfSameParticipant) {
+      const hasAny = Array.from(this.remoteStreams.values())
+        .some(t => t.participantSessionId === tile.participantSessionId);
+      if (!hasAny) this.participants.delete(tile.participantSessionId);
+      this.renderRoster();
+    }
+  }
+
+  refreshTileStates() {
+    // Mark audio-only tiles (no active video for that participant)
+    const byParticipant = new Map();
+    for (const t of this.remoteStreams.values()) {
+      const cur = byParticipant.get(t.participantSessionId);
+      if (!cur || t.kind === 'video' || t.kind === 'screen') byParticipant.set(t.participantSessionId, t);
+    }
+    for (const t of this.remoteStreams.values()) {
+      const dominant = byParticipant.get(t.participantSessionId);
+      const isAudioOnly = dominant.kind === 'audio';
+      t.tileEl.classList.toggle('audio-only', isAudioOnly);
+      t.tileEl.dataset.initial = (t.name || '?').charAt(0).toUpperCase();
+      // Mic-off indicator on the tile label
+      const micOffEl = t.labelEl.querySelector('.mic-off');
+      if (micOffEl) micOffEl.classList.toggle('hidden', !isAudioOnly ? false : false); // show muted? leave as-is; remote mute comes from SDK
+    }
+  }
+
+  // ── Roster rendering ────────────────────────────────────────────────────
+  renderRoster() {
+    const list  = this.dom('call-roster-list');
+    const count = this.dom('call-roster-count');
+    list.innerHTML = '';
+    let n = 0;
+    for (const p of this.participants.values()) {
+      n++;
+      const li = document.createElement('li');
+      li.className = 'call-roster-item';
+      li.dataset.pid = p._id;
+      if (p.isLocal && this.localAudioMuted) li.classList.add('speaking'); // no-op reuse
+      li.innerHTML = `
+        <div class="call-roster-avatar">${this.app.escHtml((p.name||'?').charAt(0).toUpperCase())}</div>
+        <div class="call-roster-name">${this.app.escHtml(p.name || 'Guest')}</div>
+        <div class="call-roster-status">
+          ${p.audio ? '' : '<i class="fas fa-microphone-slash" title="mic off"></i>'}
+        </div>`;
+      list.appendChild(li);
+    }
+    count.textContent = n;
+  }
+
+  // ── Modal + status helpers ──────────────────────────────────────────────
+  show(title, statusText) {
+    this.dom('call-title-text').textContent = title;
+    this.dom('call-status-text').textContent = statusText || 'Connecting…';
+    this.dom('call-modal').classList.remove('hidden');
+    this.dom('call-modal').setAttribute('aria-hidden', 'false');
+    this.dom('voice-call-btn').classList.toggle('active', this.active);
+    this.dom('video-call-btn').classList.toggle('active', this.active);
+  }
+  hide() {
+    this.dom('call-modal').classList.add('hidden');
+    this.dom('call-modal').setAttribute('aria-hidden', 'true');
+    this.dom('voice-call-btn').classList.remove('active');
+    this.dom('video-call-btn').classList.remove('active');
+  }
+
+  setStatus(kind, text) {
+    const s = this.dom('call-status');
+    s.classList.remove('connected', 'failed', 'ended');
+    if (kind === 'connected') s.classList.add('connected');
+    if (kind === 'failed')    s.classList.add('failed');
+    if (kind === 'ended')     s.classList.add('ended');
+    s.querySelector('#call-status-text').textContent = text;
+  }
+
+  setState(s) { this.state = s; }
+
+  // ── Hangup / cleanup ────────────────────────────────────────────────────
+  async hangup() {
+    if (!this.active && !this.meeting) { this.hide(); return; }
+    this.active = false;
+
+    try { if (this.meeting) await this.meeting.leaveMeeting(); } catch (e) { console.warn('leaveMeeting:', e); }
+
+    // Tear down every remote <video> + tile (memory leak prevention)
+    for (const streamId of Array.from(this.remoteStreams.keys())) {
+      this.removeRemoteStream(streamId, false);
+    }
+
+    // Detach local preview
+    const local = this.dom('call-local-video');
+    try { local.pause(); local.srcObject = null; } catch (_) {}
+
+    // Reset control states
+    this.localAudioMuted = false;
+    this.localVideoPaused = false;
+    this.isScreenSharing = false;
+    this.setCtrlState('call-mute-btn', false);
+    this.setCtrlState('call-cam-btn', false);
+    this.setCtrlState('call-screen-btn', false);
+    this.updateLocalMicIndicator();
+
+    // Reset roster
+    this.participants.clear();
+    this.renderRoster();
+    this.setStatus('ended', 'Call ended');
+
+    this.meeting = null;
+    this.room    = null;
+    this.setState('idle');
+
+    // Slight delay so the user sees the "ended" pill
+    setTimeout(() => this.hide(), 350);
+  }
+}
