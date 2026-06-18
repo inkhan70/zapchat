@@ -60,6 +60,22 @@ if (MONGODB_URI) {
   })
   .then(() => { isMongoConnected = true; console.log('✅ MongoDB connected'); })
   .catch(err => console.error('❌ MongoDB error:', err.message));
+
+  // Keep isMongoConnected in sync with the actual connection lifecycle —
+  // this matters because a connection can drop AFTER the initial .then()
+  // fires (e.g. network blip, Atlas pausing a free cluster), and without
+  // these listeners isMongoConnected would stay "true" forever even
+  // though queries are silently failing or falling through.
+  mongoose.connection.on('disconnected', () => {
+    isMongoConnected = false;
+    console.warn('⚠️ MongoDB disconnected — falling back to in-memory storage until reconnected');
+  });
+  mongoose.connection.on('reconnected', () => {
+    isMongoConnected = true;
+    console.log('✅ MongoDB reconnected');
+  });
+} else {
+  console.warn('⚠️ No MONGODB_URI set — running in IN-MEMORY mode permanently. Data will not persist across restarts.');
 }
 
 // ─── Schemas & Models ────────────────────────────────────────────────────────
@@ -129,8 +145,11 @@ app.post('/api/register', async (req, res) => {
   if (username.length < 3)       return res.status(400).json({ error: 'Username must be at least 3 characters' });
   if (password.length < 4)       return res.status(400).json({ error: 'Password must be at least 4 characters' });
 
+  const dbActive = useDB();
+  console.log(`🔍 REGISTER ATTEMPT: username="${username}" | DB mode: ${dbActive ? 'MongoDB' : 'IN-MEMORY FALLBACK'}`);
+
   const clean = username.trim();
-  if (useDB()) {
+  if (dbActive) {
     const exists = await UserModel.findOne({ username: clean }).select('_id').lean();
     if (exists) return res.status(409).json({ error: 'Username already taken' });
   } else {
@@ -145,8 +164,13 @@ app.post('/api/register', async (req, res) => {
     createdAt: new Date(),
   };
 
-  if (useDB()) await UserModel.create(user);
-  else         users.set(clean, user);
+  if (dbActive) {
+    await UserModel.create(user);
+    console.log(`✅ REGISTER SUCCESS: "${clean}" saved to MongoDB`);
+  } else {
+    users.set(clean, user);
+    console.log(`⚠️ REGISTER SUCCESS (BUT FRAGILE): "${clean}" saved to IN-MEMORY only — will be lost on restart`);
+  }
 
   const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar, status: user.status } });
@@ -156,14 +180,25 @@ app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
+  const dbActive = useDB();
+  console.log(`🔍 LOGIN ATTEMPT: username="${username}" | DB mode: ${dbActive ? 'MongoDB' : 'IN-MEMORY FALLBACK'} | in-memory user count: ${users.size}`);
+
   let user;
-  if (useDB()) user = await UserModel.findOne({ username: username.trim() }).lean();
+  if (dbActive) user = await UserModel.findOne({ username: username.trim() }).lean();
   else         user = users.get(username.trim());
 
-  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-  const valid = await bcrypt.compare(password, user.passwordHash);
-  if (!valid)   return res.status(401).json({ error: 'Invalid credentials' });
+  if (!user) {
+    console.log(`❌ LOGIN FAILED: no user found for "${username}" in ${dbActive ? 'MongoDB' : 'memory'}`);
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
 
+  const valid = await bcrypt.compare(password, user.passwordHash);
+  if (!valid) {
+    console.log(`❌ LOGIN FAILED: password mismatch for "${username}"`);
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  console.log(`✅ LOGIN SUCCESS: "${username}" authenticated via ${dbActive ? 'MongoDB' : 'memory'}`);
   const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar, status: user.status } });
 });
@@ -382,10 +417,6 @@ io.on('connection', socket => {
   });
 
   // ─── CALL SIGNALING ─────────────────────────────────────────────────────
-  // None of this touches Metered directly — it just relays "ring", "accept",
-  // "reject", and "hang up" between the two browsers over the socket they
-  // already have open. The actual audio/video happens once both sides call
-  // meeting.join() on the room created via /api/create-room.
   socket.on('call_invite', ({ to, callType, roomURL, roomName }) => {
     const targetSocket = onlineUsers.get(to);
     if (!targetSocket) {
