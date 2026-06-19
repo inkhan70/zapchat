@@ -1,13 +1,11 @@
 /* ═══════════════════════════════════════════
-   ZapChat – Client App
+   ZapChat – Client App (With Call Support)
    ═══════════════════════════════════════════ */
 
-// CRITICAL PRODUCTION FIX: Always use relative paths.
-// app.js is served by the same Express server that hosts the API, so
-// relative paths (`/api/...`) automatically resolve to whatever domain
-// the page is currently loaded from — Back4app, Vercel, or localhost —
-// with zero hardcoding and zero risk of pointing at the wrong host.
+// CRITICAL PRODUCTION FIX: Always use relative paths for basic APIs.
+// However, call routing points explicitly to your secure backend.
 const API = '';
+const BACKEND_SERVER = 'https://zapchat-server.vercel.app';
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
@@ -157,6 +155,12 @@ class ZapChat {
     // Back button (mobile)
     document.getElementById('back-btn').addEventListener('click', () => this.closeChatMobile());
 
+    // Call Action Buttons (Voice & Video)
+    const voiceBtn = document.getElementById('voice-call-btn');
+    const videoBtn = document.getElementById('video-call-btn');
+    if (voiceBtn) voiceBtn.addEventListener('click', () => this.initiateCall('voice'));
+    if (videoBtn) videoBtn.addEventListener('click', () => this.initiateCall('video'));
+
     // Emoji
     document.querySelector('.emoji-btn').addEventListener('click', e => {
       e.stopPropagation();
@@ -175,9 +179,64 @@ class ZapChat {
     this.fetchUsers();
   }
 
+  // ─── CALL HANDLING ───────────────────────────────────────────────────────
+  async initiateCall(type) {
+    if (!this.activeChat) return;
+    
+    this.showToast('Calling...', `Starting ${type} call with ${this.activeChat}`, 'message');
+
+    try {
+      // Step 1: Query your separate backend Vercel server to build a space securely
+      const response = await fetch(`${BACKEND_SERVER}/api/calls/room`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.token}`
+        },
+        body: JSON.stringify({
+          roomName: `zapchat-${this.user.username}-${this.activeChat}-${Date.now()}`
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || 'Server rejected call setup request.');
+      }
+
+      // Step 2: Use the response token and properties to link the user to the WebRTC screen
+      console.log('Metered room created successfully:', data.room.roomName);
+      
+      // Send a signaling link through websockets to alert the receiver
+      this.socket.emit('call_incoming', {
+        to: this.activeChat,
+        roomName: data.room.roomName,
+        type: type
+      });
+
+      this.joinCallRoom(data.room.roomName, type);
+
+    } catch (err) {
+      console.error('Failed to initiate call:', err);
+      this.showToast('Call Error', err.message || 'Could not connect to voice/video services.', 'error');
+    }
+  }
+
+  joinCallRoom(roomName, type) {
+    // If you are using the Metered Embedded iframe or library script:
+    // This dynamically configures an iframe area or overlay view.
+    const domain = 'zapchat.metered.live'; // Your Metered domain string handle
+    const callUrl = `https://${domain}/${roomName}?video=${type === 'video'}&audio=true`;
+    
+    // Simple popup/iframe system for standard deployment setups
+    const callWindow = window.open(callUrl, 'ZapChat Call', 'width=800,height=600');
+    if (!callWindow) {
+      this.showToast('Popup Blocked', 'Please allow popups to enter the call screen room.', 'error');
+    }
+  }
+
   // ─── SOCKET ──────────────────────────────────────────────────────────────
   connectSocket() {
-    // Optimized for production WebSocket transport handshakes
     this.socket = io(API, {
       auth: { token: this.token },
       transports: ['websocket', 'polling'],
@@ -197,6 +256,14 @@ class ZapChat {
 
     this.socket.on('disconnect', () => {
       console.log('🔴 Socket disconnected');
+    });
+
+    // Incoming call signal receiver setup
+    this.socket.on('incoming_call_signal', ({ from, roomName, type }) => {
+      const accept = confirm(`Incoming ${type} call from ${from}. Accept?`);
+      if (accept) {
+        this.joinCallRoom(roomName, type);
+      }
     });
 
     this.socket.on('online_users', users => {
@@ -260,8 +327,6 @@ class ZapChat {
 
   renderContacts(users) {
     const list = this.domCache.usersList;
-    
-    // Performance: Use DocumentFragment to prevent browser layout reflow redraw cycles
     const fragment = document.createDocumentFragment();
     list.innerHTML = '';
     
@@ -330,16 +395,14 @@ class ZapChat {
 
   // ─── OPEN / CLOSE CHAT ───────────────────────────────────────────────────
   async openChat(username) {
-    if (this.activeChat === username) return; // Prevent double trigger overhead
+    if (this.activeChat === username) return;
     
     this.activeChat = username;
     this.ensureChat(username);
 
-    // Reset unread counts instantly
     this.chats.get(username).unread = 0;
     this.socket.emit('mark_read', { from: username });
 
-    // Update Top Appbar Information
     document.getElementById('chat-name').textContent = username;
     document.getElementById('chat-avatar').textContent = username.charAt(0).toUpperCase();
     this.domCache.chatStatus.textContent = this.onlineSet.has(username) ? '🟢 Online' : '🔒 Encrypted';
@@ -347,11 +410,9 @@ class ZapChat {
     document.getElementById('chat-empty').classList.add('hidden');
     document.getElementById('active-chat').classList.remove('hidden');
 
-    // Mobile UI Slide handles
     document.querySelector('.chat-panel').classList.add('visible');
     document.querySelector('.sidebar').classList.add('hidden-mobile');
 
-    // Active visual highlight
     document.querySelectorAll('.contact-item').forEach(el => {
       el.classList.toggle('active', el.dataset.username === username);
     });
@@ -359,7 +420,6 @@ class ZapChat {
     const msgArea = this.domCache.messagesArea;
     msgArea.innerHTML = '<div class="messages-date-divider"><span>Today</span></div>';
 
-    // Populate messaging logs smoothly
     try {
       const res = await fetch(`${API}/api/messages/${username}`, {
         headers: { Authorization: `Bearer ${this.token}` }
@@ -514,7 +574,6 @@ class ZapChat {
     const chat = this.chats.get(username);
     const isOnline = this.onlineSet.has(username);
 
-    // Update inside target list compartments
     const containers = [this.domCache.chatsSection, document.getElementById('contacts-section')];
     
     containers.forEach(container => {
@@ -552,17 +611,15 @@ class ZapChat {
     const emptyState = section.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
 
-    // Check if an entry exists already inside the active chat history list layout
     const existingEntry = section.querySelector(`.contact-item[data-username="${username}"]`);
     
     if (existingEntry) {
-      // If it's already at the very top, don't move it unnecessarily
       if (section.firstChild === existingEntry) return;
       existingEntry.remove();
     }
 
     const el = this.createContactEl({ username }, true);
-    section.insertBefore(el, section.firstChild); // Prepend to top of dashboard list
+    section.insertBefore(el, section.firstChild);
   }
 
   // ─── EMOJI ───────────────────────────────────────────────────────────────
@@ -603,7 +660,6 @@ class ZapChat {
   // ─── UTILS ───────────────────────────────────────────────────────────────
   scrollBottom() {
     const area = this.domCache.messagesArea;
-    // requestAnimationFrame synchronizes execution matching device refreshes
     requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
   }
 
