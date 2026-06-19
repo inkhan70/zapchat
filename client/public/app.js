@@ -29,8 +29,16 @@ class ZapChat {
       chatsSection: document.getElementById('chats-section'),
     };
 
-    this.bindAuthUI();
-    if (this.token && this.user) this.boot();
+        this.bindAuthUI();
+   // Wrap the boot sequence in a try/catch so a minor layout issue 
+    // never breaks your main login/register page buttons.
+    try {
+      if (this.token && this.user) {
+        this.boot();
+      }
+    } catch (e) {
+      console.error("Boot sequence paused safely:", e);
+    }
   }
 
   // ─── AUTH ───────────────────────────────────────────────────────────────
