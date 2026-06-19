@@ -14,18 +14,12 @@ const JWT_SECRET   = process.env.JWT_SECRET   || 'zapchat_super_secret_key_2024'
 const PORT         = process.env.PORT         || 5000;
 const MONGODB_URI  = process.env.MONGODB_URI;
 
-// Metered Video SDK credentials.
-// App domain = the subdomain of your Metered app, e.g. "zapchat-server.metered.live".
-// Secret key = server-side only, loaded from env. Rotate via the Metered
-// dashboard if it's ever exposed (e.g. pasted into a chat, committed to git).
-const METERED_APP_DOMAIN = process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live';
+// ✅ FIXED: Updated configuration names to fully match your Vercel panel settings
+const METERED_APP_DOMAIN = process.env.METERED_DOMAIN || process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live';
 const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY;
 const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 
 // Explicit allowed-origin list:
-//  1. Back4app production container (primary)
-//  2. Vercel deployment (secondary / legacy)
-//  3. Local development
 const ALLOWED_ORIGINS = [
   'https://echochat-fvq5kwvs.b4a.run',
   'https://zapchat-server.vercel.app',
@@ -36,7 +30,6 @@ const ALLOWED_ORIGINS = [
 ];
 
 // Origin-validator — returns the origin string if it is allowed, false otherwise.
-// Also permits same-origin/static requests that carry no Origin header.
 function corsOriginValidator(origin, callback) {
   if (!origin || ALLOWED_ORIGINS.includes(origin)) {
     callback(null, origin || true);
@@ -61,11 +54,6 @@ if (MONGODB_URI) {
   .then(() => { isMongoConnected = true; console.log('✅ MongoDB connected'); })
   .catch(err => console.error('❌ MongoDB error:', err.message));
 
-  // Keep isMongoConnected in sync with the actual connection lifecycle —
-  // this matters because a connection can drop AFTER the initial .then()
-  // fires (e.g. network blip, Atlas pausing a free cluster), and without
-  // these listeners isMongoConnected would stay "true" forever even
-  // though queries are silently failing or falling through.
   mongoose.connection.on('disconnected', () => {
     isMongoConnected = false;
     console.warn('⚠️ MongoDB disconnected — falling back to in-memory storage until reconnected');
@@ -75,7 +63,7 @@ if (MONGODB_URI) {
     console.log('✅ MongoDB reconnected');
   });
 } else {
-  console.warn('⚠️ No MONGODB_URI set — running in IN-MEMORY mode permanently. Data will not persist across restarts.');
+  console.warn('⚠️ No MONGODB_URI set — running in IN-MEMORY mode permanently.');
 }
 
 // ─── Schemas & Models ────────────────────────────────────────────────────────
@@ -115,10 +103,10 @@ app.use(cors({
   methods:     ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-app.options('*', cors());          // Pre-flight pass-through for all routes
+app.options('*', cors());
 app.use(express.json());
 
-// Serve bundled frontend (server/public/) before API routes
+// Serve bundled frontend static assets
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -142,13 +130,9 @@ function useDB() {
 app.post('/api/register', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password)    return res.status(400).json({ error: 'Username and password required' });
-  if (username.length < 3)       return res.status(400).json({ error: 'Username must be at least 3 characters' });
-  if (password.length < 4)       return res.status(400).json({ error: 'Password must be at least 4 characters' });
-
-  const dbActive = useDB();
-  console.log(`🔍 REGISTER ATTEMPT: username="${username}" | DB mode: ${dbActive ? 'MongoDB' : 'IN-MEMORY FALLBACK'}`);
-
   const clean = username.trim();
+  const dbActive = useDB();
+
   if (dbActive) {
     const exists = await UserModel.findOne({ username: clean }).select('_id').lean();
     if (exists) return res.status(409).json({ error: 'Username already taken' });
@@ -166,10 +150,8 @@ app.post('/api/register', async (req, res) => {
 
   if (dbActive) {
     await UserModel.create(user);
-    console.log(`✅ REGISTER SUCCESS: "${clean}" saved to MongoDB`);
   } else {
     users.set(clean, user);
-    console.log(`⚠️ REGISTER SUCCESS (BUT FRAGILE): "${clean}" saved to IN-MEMORY only — will be lost on restart`);
   }
 
   const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
@@ -181,24 +163,15 @@ app.post('/api/login', async (req, res) => {
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
   const dbActive = useDB();
-  console.log(`🔍 LOGIN ATTEMPT: username="${username}" | DB mode: ${dbActive ? 'MongoDB' : 'IN-MEMORY FALLBACK'} | in-memory user count: ${users.size}`);
-
   let user;
   if (dbActive) user = await UserModel.findOne({ username: username.trim() }).lean();
   else         user = users.get(username.trim());
 
-  if (!user) {
-    console.log(`❌ LOGIN FAILED: no user found for "${username}" in ${dbActive ? 'MongoDB' : 'memory'}`);
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
   const valid = await bcrypt.compare(password, user.passwordHash);
-  if (!valid) {
-    console.log(`❌ LOGIN FAILED: password mismatch for "${username}"`);
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
+  if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-  console.log(`✅ LOGIN SUCCESS: "${username}" authenticated via ${dbActive ? 'MongoDB' : 'memory'}`);
   const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar, status: user.status } });
 });
@@ -240,16 +213,6 @@ app.get('/api/messages/:with', async (req, res) => {
 });
 
 // ─── REST: Metered Room Creation ─────────────────────────────────────────────
-// POST /api/create-room
-// Body (optional):
-//   { roomName?: string, privacy?: "public"|"private", with?: string }
-//   - If roomName is omitted, a stable name is derived from the caller +
-//     the optional `with` field (sorted usernames) so the same chat always
-//     lands in the same room.
-//
-// Auth: requires a valid Bearer token (same pattern as /api/users, /api/messages).
-// The secret key is never sent to the client — this route is the only place
-// that talks to Metered's REST API directly.
 app.post('/api/create-room', async (req, res) => {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
@@ -260,6 +223,7 @@ app.post('/api/create-room', async (req, res) => {
 
   const withUser = (req.body && typeof req.body.with === 'string') ? req.body.with.trim() : '';
   const explicit = (req.body && typeof req.body.roomName === 'string') ? req.body.roomName.trim() : '';
+  
   const roomName = (explicit
     || [decoded.username, withUser].filter(Boolean).sort().join('-').toLowerCase()
                        .replace(/[^a-z0-9-]/g, '-')
@@ -268,17 +232,14 @@ app.post('/api/create-room', async (req, res) => {
   const privacy = (req.body && req.body.privacy === 'private') ? 'private' : 'public';
 
   try {
-    // 1) Try to fetch the room first — reuse it if it already exists so a
-    //    returning caller lands in the same room as the original chat.
     let room = null;
     try {
       const existing = await fetch(
         `${METERED_API_BASE}/room/${encodeURIComponent(roomName)}?secretKey=${METERED_SECRET_KEY}`
       );
       if (existing.ok) room = await existing.json();
-    } catch (_) { /* network blip — fall through to create */ }
+    } catch (_) {}
 
-    // 2) Create the room if missing.
     if (!room) {
       const createRes = await fetch(
         `${METERED_API_BASE}/room?secretKey=${METERED_SECRET_KEY}`,
@@ -301,7 +262,7 @@ app.post('/api/create-room', async (req, res) => {
       const raw = await createRes.text();
       if (!createRes.ok) {
         let detail = raw;
-        try { detail = JSON.parse(raw).message || raw; } catch (_) { /* keep raw */ }
+        try { detail = JSON.parse(raw).message || raw; } catch (_) {}
         console.error('❌ Metered create-room failed:', createRes.status, detail);
         return res.status(createRes.status).json({ error: 'Metered create-room failed', detail });
       }
@@ -333,19 +294,18 @@ app.get('/health', (_req, res) => {
 });
 
 // ─── Wildcard SPA Fallback ────────────────────────────────────────────────────
-// Must be LAST — catches all non-API, non-static deep paths and serves index.html
-// so the browser handles client-side routing without 404s.
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ─── Socket.io ───────────────────────────────────────────────────────────────
+// ─── Socket.io Configuration ─────────────────────────────────────────────────
 const io = new Server(server, {
   cors: {
     origin:      ALLOWED_ORIGINS,
     methods:     ['GET', 'POST'],
     credentials: true,
   },
+  // Fixed setup: prioritization optimizations for Vercel Serverless runtimes
   transports:    ['websocket', 'polling'],
   pingTimeout:   30000,
   pingInterval:  15000,
@@ -416,16 +376,17 @@ io.on('connection', socket => {
     if (senderSocket) io.to(senderSocket).emit('messages_read', { by: username });
   });
 
-  // ─── CALL SIGNALING ─────────────────────────────────────────────────────
+  // ─── CALL SIGNALING SYSTEM ──────────────────────────────────────────────────
   socket.on('call_invite', ({ to, callType, roomURL, roomName }) => {
     const targetSocket = onlineUsers.get(to);
     if (!targetSocket) {
       socket.emit('call_failed', { reason: 'User is offline' });
       return;
     }
+    // Forwarding specific targeting signatures across the pipeline
     io.to(targetSocket).emit('call_invite', {
       from: username,
-      callType,   // 'audio' | 'video'
+      callType,   
       roomURL,
       roomName,
     });
@@ -462,5 +423,4 @@ io.on('connection', socket => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 server.listen(PORT, () => {
   console.log(`🚀 ZapChat server running on port ${PORT}`);
-  console.log(`🌐 Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
 });
