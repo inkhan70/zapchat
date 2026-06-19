@@ -225,7 +225,7 @@ class ZapChat {
   joinCallRoom(roomName, type) {
     // If you are using the Metered Embedded iframe or library script:
     // This dynamically configures an iframe area or overlay view.
-    const domain = 'zapchat.metered.live'; // Your Metered domain string handle
+    const domain = 'zapchat-server.metered.live'; // Your Metered domain string handle
     const callUrl = `https://${domain}/${roomName}?video=${type === 'video'}&audio=true`;
     
     // Simple popup/iframe system for standard deployment setups
