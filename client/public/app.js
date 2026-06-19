@@ -231,14 +231,20 @@ class ZapChat {
   // ─── SOCKET ──────────────────────────────────────────────────────────────
   connectSocket() {
     this.socket = io(API, {
-      auth: { token: this.token },
-      transports: ['websocket', 'polling'],
-      secure: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 2000
+  auth: { token: this.token },
+  transports: ['polling', 'websocket'], // Start with polling to secure connection on serverless, then upgrade
+  rememberUpgrade: true,
+  transportsCache: true,
+  secure: true,
+  rejectUnauthorized: false,
+  reconnection: true,
+  reconnectionAttempts: Infinity, // Keep retrying if Vercel drops the container
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  timeout: 20000
     });
 
-    this.socket.on('connect', () => {
+ this.socket.on('connect', () => {
       console.log('🟢 Socket connected');
     });
 
