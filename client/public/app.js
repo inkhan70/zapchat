@@ -2,10 +2,9 @@
    ZapChat – Client App (With Call Support)
    ═══════════════════════════════════════════ */
 
-// CRITICAL PRODUCTION FIX: Always use relative paths for basic APIs.
-// However, call routing points explicitly to your secure backend.
-const API = '';
+// ✅ FIXED: Pointed API directly to your live server so registration/login works!
 const BACKEND_SERVER = 'https://zapchat-server.vercel.app';
+const API = BACKEND_SERVER;
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
@@ -186,35 +185,34 @@ class ZapChat {
     this.showToast('Calling...', `Starting ${type} call with ${this.activeChat}`, 'message');
 
     try {
-      // Step 1: Query your separate backend Vercel server to build a space securely
-      const response = await fetch(`${BACKEND_SERVER}/api/calls/room`, {
+      // ✅ FIXED: Connected to standard endpoint to match server's create-room architecture
+      const response = await fetch(`${BACKEND_SERVER}/api/create-room`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.token}`
         },
         body: JSON.stringify({
-          roomName: `zapchat-${this.user.username}-${this.activeChat}-${Date.now()}`
+          with: this.activeChat
         })
       });
 
       const data = await response.json();
-
-      if (!response.ok || !data.ok) {
+      if (!response.ok || data.error) {
         throw new Error(data.error || 'Server rejected call setup request.');
       }
 
-      // Step 2: Use the response token and properties to link the user to the WebRTC screen
-      console.log('Metered room created successfully:', data.room.roomName);
+      console.log('Metered room configured successfully:', data.roomName);
       
-      // Send a signaling link through websockets to alert the receiver
-      this.socket.emit('call_incoming', {
+      // ✅ FIXED: Switched payload structural naming to match server signaling event pipelines
+      this.socket.emit('call_invite', {
         to: this.activeChat,
-        roomName: data.room.roomName,
-        type: type
+        callType: type,
+        roomName: data.roomName,
+        roomURL: data.roomURL
       });
 
-      this.joinCallRoom(data.room.roomName, type);
+      this.joinCallRoom(data.roomURL);
 
     } catch (err) {
       console.error('Failed to initiate call:', err);
@@ -222,14 +220,9 @@ class ZapChat {
     }
   }
 
-  joinCallRoom(roomName, type) {
-    // If you are using the Metered Embedded iframe or library script:
-    // This dynamically configures an iframe area or overlay view.
-    const domain = 'zapchat-server.metered.live'; // Your Metered domain string handle
-    const callUrl = `https://${domain}/${roomName}?video=${type === 'video'}&audio=true`;
-    
-    // Simple popup/iframe system for standard deployment setups
-    const callWindow = window.open(callUrl, 'ZapChat Call', 'width=800,height=600');
+  joinCallRoom(roomURL) {
+    // ✅ FIXED: Opens the cleanly structured absolute URL string provided directly from server response
+    const callWindow = window.open(roomURL, 'ZapChat Call', 'width=800,height=600');
     if (!callWindow) {
       this.showToast('Popup Blocked', 'Please allow popups to enter the call screen room.', 'error');
     }
@@ -258,13 +251,20 @@ class ZapChat {
       console.log('🔴 Socket disconnected');
     });
 
-    // Incoming call signal receiver setup
-    this.socket.on('incoming_call_signal', ({ from, roomName, type }) => {
-      const accept = confirm(`Incoming ${type} call from ${from}. Accept?`);
+    // ✅ FIXED: Realigned listener to catch matching server invitation streams seamlessly
+    this.socket.on('call_invite', ({ from, callType, roomURL, roomName }) => {
+      const accept = confirm(`Incoming ${callType} call from ${from}. Accept?`);
       if (accept) {
-        this.joinCallRoom(roomName, type);
+        this.socket.emit('call_accept', { to: from, roomURL, roomName });
+        this.joinCallRoom(roomURL);
+      } else {
+        this.socket.emit('call_reject', { to: from });
       }
     });
+
+    // Optional feedback logs for tracking call setup completion status
+    this.socket.on('call_accepted', data => console.log('Call was accepted by target user:', data.from));
+    this.socket.on('call_rejected', data => this.showToast('Call Rejected', `${data.from} declined the call session.`, 'error'));
 
     this.socket.on('online_users', users => {
       this.onlineSet = new Set(users);
