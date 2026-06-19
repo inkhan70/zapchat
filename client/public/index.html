@@ -11,7 +11,6 @@
 </head>
 <body>
 
-<!-- ═══════════════════ AUTH SCREEN ═══════════════════ -->
 <div id="auth-screen" class="auth-screen">
   <div class="auth-bg">
     <div class="auth-blob b1"></div>
@@ -63,10 +62,8 @@
   </div>
 </div>
 
-<!-- ═══════════════════ MAIN APP ═══════════════════ -->
 <div id="app" class="app hidden">
 
-  <!-- SIDEBAR -->
   <aside class="sidebar">
     <div class="sidebar-header">
       <div class="me-avatar" id="me-avatar"></div>
@@ -106,10 +103,8 @@
     </div>
   </aside>
 
-  <!-- CHAT PANEL -->
   <main class="chat-panel">
 
-    <!-- EMPTY STATE -->
     <div id="chat-empty" class="chat-empty">
       <div class="chat-empty-icon"><i class="fas fa-bolt"></i></div>
       <h2>Welcome to ZapChat</h2>
@@ -119,7 +114,6 @@
       </div>
     </div>
 
-    <!-- ACTIVE CHAT -->
     <div id="active-chat" class="active-chat hidden">
       <div class="chat-topbar">
         <button class="back-btn icon-btn" id="back-btn"><i class="fas fa-arrow-left"></i></button>
@@ -129,8 +123,8 @@
           <div class="chat-topbar-sub" id="chat-status">🔒 Encrypted</div>
         </div>
         <div class="chat-topbar-actions">
-          <button class="icon-btn" title="Voice Call" onclick="alert('Voice call coming soon!')"><i class="fas fa-phone"></i></button>
-          <button class="icon-btn" title="Video Call" onclick="alert('Video call coming soon!')"><i class="fas fa-video"></i></button>
+          <button class="icon-btn" id="voice-call-btn" title="Voice Call"><i class="fas fa-phone"></i></button>
+          <button class="icon-btn" id="video-call-btn" title="Video Call"><i class="fas fa-video"></i></button>
           <button class="icon-btn" title="More"><i class="fas fa-ellipsis-vertical"></i></button>
         </div>
       </div>
