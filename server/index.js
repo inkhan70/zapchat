@@ -27,8 +27,7 @@ const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:5000',
   'http://127.0.0.1:5000',
-];
-
+  ];
 // Origin-validator — returns the origin string if it is allowed, false otherwise.
 function corsOriginValidator(origin, callback) {
   if (!origin || ALLOWED_ORIGINS.includes(origin)) {
