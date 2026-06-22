@@ -7,11 +7,11 @@
 // explicitly. Relative paths would resolve against Vercel's own domain
 // and silently fail (no /api routes exist there).
 // CONFIGURATION: Points directly to your active Back4App server instance
-const BACKEND_URL ="https://echochat-wf63zbz0.b4a.run/";
+const BACKEND_URL ="https://echochat-2m8x7wvx.b4a.run";
 // Normalize for use in fetch/io calls
 const API = BACKEND_URL.replace(/\/$/, '');
 
-const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','🙂','😉','😇','🤗','😜','🤩','😬','🤤'];
+const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏'];
 
 class ZapChat {
   constructor() {
@@ -45,7 +45,7 @@ class ZapChat {
     if (this.token && this.user) this.boot();
   }
 
-  // ─── AUTH ────────────────────────────────────────────────────────────
+  // ─── AUTH ──────────────────────────────────────────────────────────────
   bindAuthUI() {
     document.querySelectorAll('.auth-tab').forEach(tab => {
       tab.addEventListener('click', () => {
@@ -203,7 +203,7 @@ class ZapChat {
     location.reload();
   }
 
-  // ─── BOOT ────────────────────────────────────────────────────────────
+  // ─── BOOT ──────────────────────────────────────────────────────────────
   boot() {
     // Ensure auth screen is hidden and app is visible
     document.getElementById('auth-screen').style.display = 'none';
@@ -260,7 +260,7 @@ class ZapChat {
     this.fetchUsers();
   }
 
-  // ─── SOCKET ───────────────────────────────────────────────────────────
+  // ─── SOCKET ──────────────────────────────────────────────────────────────
   connectSocket() {
     this.socket = io(API, {
       auth: { token: this.token },
@@ -464,7 +464,7 @@ class ZapChat {
     this.activeChat = null;
   }
 
-  // ─── MESSAGES ──────────────────────────────────────────────────────────
+  // ─── MESSAGES ─────────────────────────────────────────────────────────────
   sendMessage() {
     const input = this.domCache.messageInput;
     const text = input.value.trim();
@@ -544,7 +544,7 @@ class ZapChat {
     });
   }
 
-  // ─── TYPING ───────────────────────────────────────────────────────────
+  // ─── TYPING ───────────────────────────────────────────────────────────────
   onInputChange() {
     const input = this.domCache.messageInput;
     input.style.height = 'auto';
@@ -635,7 +635,7 @@ class ZapChat {
     section.insertBefore(el, section.firstChild);
   }
 
-  // ─── EMOJI ───────────────────────────────────────────────────────────
+  // ─── EMOJI ──────────────────────────────────────────────────────────────
   buildEmojiPicker() {
     const picker = this.domCache.emojiPicker;
     const fragment = document.createDocumentFragment();
@@ -656,7 +656,7 @@ class ZapChat {
     picker.appendChild(fragment);
   }
 
-  // ─── CALLING ──────────────────────────────────────────────────────────
+  // ─── CALLING ─────────────────────────────────────────────────────────────
   async startCall(callType) {
     if (!this.activeChat) return;
     const toUser = this.activeChat;
@@ -859,7 +859,7 @@ class ZapChat {
     }
   }
 
-  // ─── TOASTS ───────────────────────────────────────────────────────────
+  // ─── TOASTS ─────────────────────────────────────────────────────────────
   showToast(title, body, type = 'message') {
     const container = document.querySelector('.toast-container');
     if (!container) return;
@@ -873,7 +873,7 @@ class ZapChat {
     setTimeout(() => toast.remove(), 4200);
   }
 
-  // ─── UTILS ───────────────────────────────────────────────────────────
+  // ─── UTILS ──────────────────────────────────────────────────────────────
   scrollBottom() {
     const area = this.domCache.messagesArea;
     requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
