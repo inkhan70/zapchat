@@ -8,8 +8,10 @@
 // and silently fail (no /api routes exist there).
 // CONFIGURATION: Points directly to your active Back4App server instance
 const BACKEND_URL ="https://echochat-wf63zbz0.b4a.run/";
+// Normalize for use in fetch/io calls
+const API = BACKEND_URL.replace(/\/$/, '');
 
-const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
+const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','🙂','😉','😇','🤗','😜','🤩','😬','🤤'];
 
 class ZapChat {
   constructor() {
@@ -43,7 +45,7 @@ class ZapChat {
     if (this.token && this.user) this.boot();
   }
 
-  // ─── AUTH ───────────────────────────────────────────────────────────────
+  // ─── AUTH ────────────────────────────────────────────────────────────
   bindAuthUI() {
     document.querySelectorAll('.auth-tab').forEach(tab => {
       tab.addEventListener('click', () => {
@@ -79,7 +81,7 @@ class ZapChat {
     btn.style.opacity = '0.6';
     try {
       // 1. Send the login request to the backend server
-    const response = await fetch(`${BACKEND_URL}/api/login`, {
+    const response = await fetch(`${BACKEND_URL.replace(/\/$/, '')}/api/login`, {
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
@@ -137,8 +139,12 @@ class ZapChat {
       errEl.textContent = 'Please fill all fields.'; 
       return; 
     }
-   try {
-      const response = await fetch(`${BACKEND_URL}/api/register`, { //  FIXED
+    
+    const btn = document.getElementById('register-btn');
+    btn.style.opacity = '0.6';
+    
+    try {
+      const response = await fetch(`${BACKEND_URL.replace(/\/$/, '')}/api/register`, { //  FIXED
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
@@ -197,7 +203,7 @@ class ZapChat {
     location.reload();
   }
 
-  // ─── BOOT ────────────────────────────────────────────────────────────────
+  // ─── BOOT ────────────────────────────────────────────────────────────
   boot() {
     // Ensure auth screen is hidden and app is visible
     document.getElementById('auth-screen').style.display = 'none';
@@ -254,7 +260,7 @@ class ZapChat {
     this.fetchUsers();
   }
 
-  // ─── SOCKET ──────────────────────────────────────────────────────────────
+  // ─── SOCKET ───────────────────────────────────────────────────────────
   connectSocket() {
     this.socket = io(API, {
       auth: { token: this.token },
@@ -458,7 +464,7 @@ class ZapChat {
     this.activeChat = null;
   }
 
-  // ─── MESSAGES ────────────────────────────────────────────────────────────
+  // ─── MESSAGES ──────────────────────────────────────────────────────────
   sendMessage() {
     const input = this.domCache.messageInput;
     const text = input.value.trim();
@@ -538,7 +544,7 @@ class ZapChat {
     });
   }
 
-  // ─── TYPING ──────────────────────────────────────────────────────────────
+  // ─── TYPING ───────────────────────────────────────────────────────────
   onInputChange() {
     const input = this.domCache.messageInput;
     input.style.height = 'auto';
@@ -556,7 +562,7 @@ class ZapChat {
   stopTyping() {
     if (this.isTyping && this.activeChat) {
       this.isTyping = false;
-      this.socket.emit('typing_start', { to: this.activeChat });
+      // Only send typing_stop when stopping
       this.socket.emit('typing_stop', { to: this.activeChat });
     }
     clearTimeout(this.typingTimer);
@@ -629,7 +635,7 @@ class ZapChat {
     section.insertBefore(el, section.firstChild);
   }
 
-  // ─── EMOJI ───────────────────────────────────────────────────────────────
+  // ─── EMOJI ───────────────────────────────────────────────────────────
   buildEmojiPicker() {
     const picker = this.domCache.emojiPicker;
     const fragment = document.createDocumentFragment();
@@ -650,7 +656,7 @@ class ZapChat {
     picker.appendChild(fragment);
   }
 
-  // ─── CALLING ─────────────────────────────────────────────────────────────
+  // ─── CALLING ──────────────────────────────────────────────────────────
   async startCall(callType) {
     if (!this.activeChat) return;
     const toUser = this.activeChat;
@@ -853,7 +859,7 @@ class ZapChat {
     }
   }
 
-  // ─── TOASTS ──────────────────────────────────────────────────────────────
+  // ─── TOASTS ───────────────────────────────────────────────────────────
   showToast(title, body, type = 'message') {
     const container = document.querySelector('.toast-container');
     if (!container) return;
@@ -867,7 +873,7 @@ class ZapChat {
     setTimeout(() => toast.remove(), 4200);
   }
 
-  // ─── UTILS ───────────────────────────────────────────────────────────────
+  // ─── UTILS ───────────────────────────────────────────────────────────
   scrollBottom() {
     const area = this.domCache.messagesArea;
     requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
