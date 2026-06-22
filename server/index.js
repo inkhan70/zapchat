@@ -19,21 +19,50 @@ const METERED_APP_DOMAIN = process.env.METERED_DOMAIN || process.env.METERED_APP
 const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY;
 const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 
+// Explicit allowed-origin list. Vercel-hosted frontend domains are also
+// derived from the VERCEL_FRONTEND_ORIGINS env var (comma-separated) so
+// you can add a new preview domain without redeploying the backend.
 const ALLOWED_ORIGINS = [
-  'https://echochat-wf63zbz0.b4a.run', // ✅ ADD THIS LIVE ONE NOW
-  'https://echochat-pjabun7d.b4a.run',
+  // Stable Vercel production domains
   'https://zapchat-server.vercel.app',
   'https://zapchat-server-inkhan.vercel.app',
+  'https://inkhan70-zapchat.vercel.app',
+  // Vercel preview deployments follow the pattern
+  //   <project>-<scope>-<user-hash>.vercel.app
+  // — those are auto-allowed below when VERCEL_FRONTEND_ORIGINS is set.
+  // Local dev
   'http://localhost:3000',
-  'http://localhost:5000'
+  'http://localhost:5000',
+  'http://127.0.0.1:5000',
+  // Fallback legacy Back4app self-origin (in case the browser hits us directly)
+  'https://echochat-fvq5kwvs.b4a.run',
+  'https://echochat-wf63zbz0.b4a.run',
+  'https://echochat-pjabun7d.b4a.run',
+  // Back4app self-origin (the backend's own URL) so the Vercel proxy's
+  // forwarded Origin doesn't get rejected when the URL rotates.
+  ...(process.env.BACKEND_URL ? [process.env.BACKEND_URL.replace(/\/$/, '')] : []),
 ];
-// Origin-validator — returns the origin string if it is allowed, false otherwise.
-function corsOriginValidator(origin, callback) {
-  if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-    callback(null, origin || true);
-  } else {
-    callback(new Error(`CORS policy: origin '${origin}' is not allowed`));
+
+// Pull in any extra frontend origins from env (comma-separated). Lets
+// you whitelist new Vercel preview URLs without touching this file.
+if (process.env.VERCEL_FRONTEND_ORIGINS) {
+  for (const o of process.env.VERCEL_FRONTEND_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)) {
+    if (!ALLOWED_ORIGINS.includes(o)) ALLOWED_ORIGINS.push(o);
   }
+}
+
+// Helper to also auto-allow all Vercel preview URLs of THIS project —
+// the slug `inkhan70-zapchat-server-public` is the constant; every
+// preview is `<slug>-<scope>-<hash>.vercel.app` or `<scope>-<slug>-<hash>`.
+const VERCEL_HOST_RE = /^https:\/\/([\w-]+-)?inkhan70-zapchat(-[\w-]+)?\.vercel\.app$/;
+// Origin-validator — returns the origin string if it is allowed, false otherwise.
+// Allows: (a) anything in ALLOWED_ORIGINS, (b) any Vercel preview of this project,
+// (c) same-origin / no-Origin requests.
+function corsOriginValidator(origin, callback) {
+  if (!origin) return callback(null, true);
+  if (ALLOWED_ORIGINS.includes(origin)) return callback(null, origin);
+  if (VERCEL_HOST_RE.test(origin))       return callback(null, origin);
+  callback(new Error(`CORS policy: origin '${origin}' is not allowed`));
 }
 
 // ─── Express App & HTTP Server ───────────────────────────────────────────────
@@ -255,14 +284,17 @@ app.post('/api/create-room', async (req, res) => {
     let room = null;
     try {
       const existing = await fetch(
-        `${METERED_API_BASE}/room/${encodeURIComponent(roomName)}?secretKey=${METERED_SECRET_KEY}`
+        // ✅ URL-encode the secret so keys with special chars (+, /, =) don't 401.
+        `${METERED_API_BASE}/room/${encodeURIComponent(roomName)}?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`
       );
       if (existing.ok) room = await existing.json();
     } catch (_) {}
 
     if (!room) {
       const createRes = await fetch(
-        `${METERED_API_BASE}/room?secretKey=${METERED_SECRET_KEY}`,
+        // ✅ secret key passed as a QUERY PARAM (Metered's REST API requirement)
+        //    and URL-encoded so keys with special characters don't 401.
+        `${METERED_API_BASE}/room?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`,
         {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -281,10 +313,26 @@ app.post('/api/create-room', async (req, res) => {
 
       const raw = await createRes.text();
       if (!createRes.ok) {
-        let detail = raw;
-        try { detail = JSON.parse(raw).message || raw; } catch (_) {}
-        console.error('❌ Metered create-room failed:', createRes.status, detail);
-        return res.status(createRes.status).json({ error: 'Metered create-room failed', detail });
+        // Parse the body once for the response, but log the WHOLE thing —
+        // never swallow Metered's actual error into a generic message.
+        let parsed;
+        try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+        const detail = parsed?.message || parsed?.error || raw || createRes.statusText;
+        const maskedUrl = `${METERED_API_BASE}/room?secretKey=***${METERED_SECRET_KEY.slice(-4)}`;
+        console.error('❌ Metered create-room failed', {
+          status:    createRes.status,
+          domain:    METERED_APP_DOMAIN,
+          roomName,
+          privacy,
+          url:       maskedUrl,
+          detail,
+          rawBody:   raw.slice(0, 500),  // cap to avoid log spam
+        });
+        return res.status(createRes.status).json({
+          error:  'Metered create-room failed',
+          detail,
+          domain: METERED_APP_DOMAIN,     // helps you spot a wrong-domain bug
+        });
       }
       room = JSON.parse(raw);
     }
@@ -293,7 +341,9 @@ app.post('/api/create-room', async (req, res) => {
       roomName:      room.roomName,
       roomId:        room._id,
       privacy:       room.privacy,
-      roomURL:       `${METERED_APP_DOMAIN}/${room.roomName}`,
+      // roomURL goes to the FRONTEND which feeds it straight into the
+      // Metered JS SDK. The SDK only needs this URL — no publishable key.
+      roomURL:       `https://${METERED_APP_DOMAIN}/${room.roomName}`,
       appDomain:     METERED_APP_DOMAIN,
       publicURL:     `https://${METERED_APP_DOMAIN}/${room.roomName}`,
       context:       withUser ? { self: decoded.username, with: withUser } : null,

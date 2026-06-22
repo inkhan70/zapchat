@@ -2,14 +2,40 @@
    ZapChat – Client App
    ═══════════════════════════════════════════ */
 
-// Frontend is hosted on Vercel; backend lives on Back4app — these are
-// different origins, so API calls must point at the Back4app URL
-// explicitly. Relative paths would resolve against Vercel's own domain
-// and silently fail (no /api routes exist there).
-// CONFIGURATION: Points directly to your active Back4App server instance
-const BACKEND_URL ="https://echochat-2m8x7wvx.b4a.run";
-// Normalize for use in fetch/io calls
-const API = BACKEND_URL.replace(/\/$/, '');
+// ── Backend URL resolution ──────────────────────────────────────────────
+// Frontend is hosted on Vercel; backend lives on Back4app. Vercel rewrites
+// (see server/public/vercel.json) reverse-proxy /api/* and /socket.io/*
+// to the live Back4app URL, so the frontend only ever needs RELATIVE
+// paths — no more hand-editing the URL when Back4app rotates its slug.
+//
+// Rotating the backend is now a Vercel env-var change:
+//   Vercel dashboard → Project → Settings → Environment Variables →
+//     set BACKEND_URL = https://<new-slug>.b4a.run → redeploy.
+// No code change, no git push.
+//
+// LOCAL DEV: when this page is served from http://localhost:5000 (with
+// the backend running on the same port), the relative path '' also
+// works. If you serve the static files from a different port and want
+// to point at a backend on :5000, set `localStorage.setItem(
+// 'zc_backend_override', 'http://localhost:5000')` in DevTools.
+const API = '';
+
+// Dev-only override: if localStorage has 'zc_backend_override' set, use
+// that absolute URL instead of the relative path. Useful when serving
+// the static files from one port (e.g. `npx serve`) and the backend from
+// another (e.g. the Express server on :5000). NEVER set this in prod.
+//   localStorage.setItem('zc_backend_override', 'http://localhost:5000');
+//   localStorage.removeItem('zc_backend_override');
+function resolveApiBase() {
+  try {
+    const override = localStorage.getItem('zc_backend_override');
+    if (override && /^https?:\/\//.test(override)) {
+      return override.replace(/\/$/, '');
+    }
+  } catch (_) { /* localStorage blocked — fall through */ }
+  return API;
+}
+const API_BASE = resolveApiBase();
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏'];
 
@@ -81,7 +107,7 @@ class ZapChat {
     btn.style.opacity = '0.6';
     try {
       // 1. Send the login request to the backend server
-    const response = await fetch(`${BACKEND_URL.replace(/\/$/, '')}/api/login`, {
+    const response = await fetch(`${API_BASE}/api/login`, {
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
@@ -144,7 +170,7 @@ class ZapChat {
     btn.style.opacity = '0.6';
     
     try {
-      const response = await fetch(`${BACKEND_URL.replace(/\/$/, '')}/api/register`, { //  FIXED
+      const response = await fetch(`${API_BASE}/api/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
@@ -262,7 +288,7 @@ class ZapChat {
 
   // ─── SOCKET ──────────────────────────────────────────────────────────────
   connectSocket() {
-    this.socket = io(API, {
+    this.socket = io(API_BASE, {
       auth: { token: this.token },
       transports: ['websocket', 'polling'],
       secure: true,
@@ -328,7 +354,7 @@ class ZapChat {
   // ─── USERS / CONTACTS ────────────────────────────────────────────────────
   async fetchUsers() {
     try {
-      const res = await fetch(`${API}/api/users`, {
+      const res = await fetch(`${API_BASE}/api/users`, {
         headers: { Authorization: `Bearer ${this.token}` }
       });
       const users = await res.json();
@@ -434,7 +460,7 @@ class ZapChat {
     msgArea.innerHTML = '<div class="messages-date-divider"><span>Today</span></div>';
 
     try {
-      const res = await fetch(`${API}/api/messages/${username}`, {
+      const res = await fetch(`${API_BASE}/api/messages/${username}`, {
         headers: { Authorization: `Bearer ${this.token}` }
       });
       const history = await res.json();
@@ -662,7 +688,7 @@ class ZapChat {
     const toUser = this.activeChat;
 
     try {
-      const res = await fetch(`${API}/api/create-room`, {
+      const res = await fetch(`${API_BASE}/api/create-room`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

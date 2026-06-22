@@ -144,6 +144,28 @@ pm2 start index.js --name zapchat
 pm2 save && pm2 startup
 ```
 
+### Option D — Split: Vercel (frontend) + Back4app (backend) ← ZapChat's prod setup
+Frontend static files (`server/public/`) deploy to Vercel; the Express
+backend runs on Back4app. The two are connected via Vercel **rewrites**
+that reverse-proxy `/api/*` and `/socket.io/*` to the live Back4app URL.
+
+**Why?** Back4app's free tier rotates the container URL on sleep/redeploy.
+With a rewrite proxy, rotating the backend is a single env-var change
+in Vercel — no code change, no git push.
+
+**Setup:**
+
+1. Deploy `server/public/` to a Vercel project (root = `server/public/`).
+2. In the Vercel project, set the env var:
+   - `BACKEND_URL` = the live Back4app URL (e.g. `https://echochat-abc.b4a.run`)
+3. On the Back4app container, also set:
+   - `BACKEND_URL` = the same value (so the CORS validator auto-allows
+     requests proxied from Vercel).
+4. When the Back4app URL rotates, update **`BACKEND_URL` in both places
+   and redeploy Vercel**. No code change.
+
+See `server/public/vercel.json` for the rewrite rules.
+
 ---
 
 ## 📦 Publishing to GitHub
@@ -164,10 +186,11 @@ git push -u origin main
 
 ## 🔮 Roadmap (Future Features)
 
+- [x] Voice/video calls (Metered Web SDK)
+- [x] Split deployment (Vercel + Back4app with rewrite proxy)
 - [ ] PostgreSQL / MongoDB persistence
 - [ ] Group chats & channels
 - [ ] File & image sharing
-- [ ] Voice/video calls (WebRTC)
 - [ ] Push notifications (PWA)
 - [ ] Message reactions & replies
 - [ ] End-to-end encryption (Signal Protocol)

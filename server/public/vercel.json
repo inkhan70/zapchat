@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "_comment": "Vercel rewrites that reverse-proxy /api/* and /socket.io/* to the live Back4app backend. BACKEND_URL is read from this project's environment variables at deploy time (Vercel resolves ${VAR} in destination strings). To rotate the backend: change the BACKEND_URL env var in Vercel → Settings → Environment Variables, then redeploy. No code change, no git push.",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "${BACKEND_URL}/api/:path*"
+    },
+    {
+      "source": "/socket.io/:path*",
+      "destination": "${BACKEND_URL}/socket.io/:path*"
+    }
+  ]
+}
