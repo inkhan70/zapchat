@@ -1,160 +1,51 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>ZapChat</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
-  <link rel="stylesheet" href="style.css" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZapChat - Instant. Encrypted. Yours.</title>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <div class="auth-container">
+        <div class="auth-box">
+            <div class="brand">
+                <div class="logo-icon">⚡</div>
+                <h1>ZapChat</h1>
+                <p class="subtitle">Instant. Encrypted. Yours.</p>
+            </div>
 
-<div id="auth-screen" class="auth-screen">
-  <div class="auth-bg">
-    <div class="auth-blob b1"></div>
-    <div class="auth-blob b2"></div>
-    <div class="auth-blob b3"></div>
-  </div>
-  <div class="auth-card">
-    <div class="auth-logo">
-      <div class="logo-icon"><i class="fas fa-bolt"></i></div>
-      <h1>ZapChat</h1>
-      <p>Instant. Encrypted. Yours.</p>
-    </div>
+            <div class="auth-tabs">
+                <button id="auth-signin-tab" class="tab-btn active">Sign In</button>
+                <button id="auth-signup-tab" class="tab-btn">Create Account</button>
+            </div>
 
-    <div class="auth-tabs">
-      <button class="auth-tab active" data-tab="login">Sign In</button>
-      <button class="auth-tab" data-tab="register">Create Account</button>
-      <div class="auth-tab-slider"></div>
-    </div>
+            <h2 id="auth-title">Sign In</h2>
 
-    <div id="login-panel" class="auth-panel active">
-      <div class="input-group">
-        <i class="fas fa-user"></i>
-        <input type="text" id="login-username" placeholder="Username" autocomplete="username" />
-      </div>
-      <div class="input-group">
-        <i class="fas fa-lock"></i>
-        <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
-      </div>
-      <div id="login-error" class="auth-error"></div>
-      <button id="login-btn" class="auth-btn">
-        <span>Sign In</span><i class="fas fa-arrow-right"></i>
-      </button>
-    </div>
+            <form id="auth-form">
+                <div class="input-group">
+                    <label for="username-input">Username</label>
+                    <div class="input-wrapper">
+                        <span class="input-icon">👤</span>
+                        <input type="text" id="username-input" placeholder="Enter your username" required autocomplete="username">
+                    </div>
+                </div>
 
-    <div id="register-panel" class="auth-panel">
-      <div class="input-group">
-        <i class="fas fa-user"></i>
-        <input type="text" id="reg-username" placeholder="Choose username" autocomplete="username" />
-      </div>
-      <div class="input-group">
-        <i class="fas fa-lock"></i>
-        <input type="password" id="reg-password" placeholder="Create password" autocomplete="new-password" />
-      </div>
-      <div id="register-error" class="auth-error"></div>
-      <button id="register-btn" class="auth-btn">
-        <span>Create Account</span><i class="fas fa-arrow-right"></i>
-      </button>
-    </div>
-  </div>
-</div>
+                <div class="input-group">
+                    <label for="password-input">Password</label>
+                    <div class="input-wrapper">
+                        <span class="input-icon">🔒</span>
+                        <input type="password" id="password-input" placeholder="Enter your password" required autocomplete="current-password">
+                    </div>
+                </div>
 
-<div id="app" class="app hidden">
-
-  <aside class="sidebar">
-    <div class="sidebar-header">
-      <div class="me-avatar" id="me-avatar"></div>
-      <div class="me-info">
-        <div class="me-name" id="me-name"></div>
-        <div class="me-status">🟢 Online</div>
-      </div>
-      <div class="sidebar-actions">
-        <button class="icon-btn" title="New Chat"><i class="fas fa-pen-to-square"></i></button>
-        <button class="icon-btn" id="logout-btn" title="Logout"><i class="fas fa-right-from-bracket"></i></button>
-      </div>
-    </div>
-
-    <div class="sidebar-search">
-      <i class="fas fa-magnifying-glass"></i>
-      <input type="text" id="search-input" placeholder="Search or start a chat..." />
-    </div>
-
-    <div class="sidebar-tabs">
-      <button class="s-tab active" data-section="chats">
-        <i class="fas fa-message"></i>Chats
-      </button>
-      <button class="s-tab" data-section="contacts">
-        <i class="fas fa-users"></i>Contacts
-      </button>
-    </div>
-
-    <div id="chats-section" class="contact-list">
-      <div class="empty-state">
-        <i class="fas fa-comments"></i>
-        <p>No chats yet.<br>Pick a contact to start.</p>
-      </div>
-    </div>
-
-    <div id="contacts-section" class="contact-list hidden">
-      <div id="users-list"></div>
-    </div>
-  </aside>
-
-  <main class="chat-panel">
-
-    <div id="chat-empty" class="chat-empty">
-      <div class="chat-empty-icon"><i class="fas fa-bolt"></i></div>
-      <h2>Welcome to ZapChat</h2>
-      <p>Select a contact from the sidebar to start chatting.<br>Messages are end-to-end encrypted.</p>
-      <div class="encryption-badge">
-        <i class="fas fa-shield-halved"></i> End-to-End Encrypted
-      </div>
-    </div>
-
-    <div id="active-chat" class="active-chat hidden">
-      <div class="chat-topbar">
-        <button class="back-btn icon-btn" id="back-btn"><i class="fas fa-arrow-left"></i></button>
-        <div class="chat-topbar-avatar" id="chat-avatar"></div>
-        <div class="chat-topbar-info">
-          <div class="chat-topbar-name" id="chat-name"></div>
-          <div class="chat-topbar-sub" id="chat-status">🔒 Encrypted</div>
+                <button type="submit" id="auth-submit-btn" class="submit-btn">
+                    Sign In <span class="arrow">→</span>
+                </button>
+            </form>
         </div>
-        <div class="chat-topbar-actions">
-          <button class="icon-btn" id="voice-call-btn" title="Voice Call"><i class="fas fa-phone"></i></button>
-          <button class="icon-btn" id="video-call-btn" title="Video Call"><i class="fas fa-video"></i></button>
-          <button class="icon-btn" title="More"><i class="fas fa-ellipsis-vertical"></i></button>
-        </div>
-      </div>
-
-      <div class="messages-area" id="messages-area">
-        <div class="messages-date-divider"><span>Today</span></div>
-      </div>
-
-      <div class="composer">
-        <button class="icon-btn emoji-btn" title="Emoji"><i class="fas fa-face-smile"></i></button>
-        <div class="emoji-picker hidden" id="emoji-picker"></div>
-        <div class="composer-input-wrap">
-          <textarea id="message-input" placeholder="Type a message…" rows="1"></textarea>
-        </div>
-        <button class="send-btn" id="send-btn">
-          <i class="fas fa-paper-plane"></i>
-        </button>
-      </div>
     </div>
 
-  </main>
-</div>
-
-<script src="https://echochat-m8tjh7ss.b4a.run/socket.io/socket.io.js"></script>
-<script>
-  // Fallback if the direct server load fails
-  if (typeof io === 'undefined') {
-    document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"><\/script>');
-  }
-</script>
-<script src="app.js"></script>
+    <script type="module" src="app.js"></script>
 </body>
 </html>
