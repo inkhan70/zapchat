@@ -68,20 +68,55 @@ class ZapChat {
     const password = document.getElementById('login-password').value;
     const errEl = document.getElementById('login-error');
     errEl.textContent = '';
-    if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
+    
+    if (!username || !password) { 
+      errEl.textContent = 'Please fill all fields.'; 
+      return; 
+    }
+    
     const btn = document.getElementById('login-btn');
     btn.style.opacity = '0.6';
+    
     try {
       const res = await fetch(`${API}/api/login`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
       const data = await res.json();
-      if (!res.ok) { errEl.textContent = data.error; return; }
-      this.saveSession(data.token, data.user);
-      this.boot();
-    } catch { errEl.textContent = 'Cannot connect to server.'; }
-    finally { btn.style.opacity = '1'; }
+      
+      if (!res.ok) { 
+        errEl.textContent = data.error; 
+        return; 
+      }
+      
+      // ─── AUTH SUCCESS FIX ─────────────────────────────────
+      if (data.token) {
+        // 1. Secure token storage
+        this.saveSession(data.token, data.user);
+
+        // 2. Hide the auth screen
+        document.getElementById('auth-screen').style.display = 'none';
+
+        // 3. Show the main app interface
+        const app = document.getElementById('app');
+        if (app) {
+          app.style.setProperty('display', 'flex', 'important');
+          app.classList.remove('hidden');
+        }
+        
+        // 4. Initialize the app with sockets and chats
+        console.log("Authentication successful. Loading user dashboard...");
+        this.boot();
+      }
+      // ───────────────────────────────────────────────────────
+      
+    } catch (err) {
+      errEl.textContent = 'Cannot connect to server.';
+      console.error('Login error:', err);
+    } finally {
+      btn.style.opacity = '1';
+    }
   }
 
   async register() {
@@ -89,20 +124,55 @@ class ZapChat {
     const password = document.getElementById('reg-password').value;
     const errEl = document.getElementById('register-error');
     errEl.textContent = '';
-    if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
+    
+    if (!username || !password) { 
+      errEl.textContent = 'Please fill all fields.'; 
+      return; 
+    }
+    
     const btn = document.getElementById('register-btn');
     btn.style.opacity = '0.6';
+    
     try {
       const res = await fetch(`${API}/api/register`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
       const data = await res.json();
-      if (!res.ok) { errEl.textContent = data.error; return; }
-      this.saveSession(data.token, data.user);
-      this.boot();
-    } catch { errEl.textContent = 'Cannot connect to server.'; }
-    finally { btn.style.opacity = '1'; }
+      
+      if (!res.ok) { 
+        errEl.textContent = data.error; 
+        return; 
+      }
+      
+      // ─── REGISTRATION SUCCESS FIX ─────────────────────────
+      if (data.token) {
+        // 1. Secure token storage
+        this.saveSession(data.token, data.user);
+
+        // 2. Hide the auth screen
+        document.getElementById('auth-screen').style.display = 'none';
+
+        // 3. Show the main app interface
+        const app = document.getElementById('app');
+        if (app) {
+          app.style.setProperty('display', 'flex', 'important');
+          app.classList.remove('hidden');
+        }
+        
+        // 4. Initialize the app with sockets and chats
+        console.log("Registration successful. Loading user dashboard...");
+        this.boot();
+      }
+      // ───────────────────────────────────────────────────────
+      
+    } catch (err) {
+      errEl.textContent = 'Cannot connect to server.';
+      console.error('Registration error:', err);
+    } finally {
+      btn.style.opacity = '1';
+    }
   }
 
   saveSession(token, user) {
@@ -121,8 +191,13 @@ class ZapChat {
 
   // ─── BOOT ────────────────────────────────────────────────────────────────
   boot() {
+    // Ensure auth screen is hidden and app is visible
+    document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('auth-screen').classList.add('hidden');
-    document.getElementById('app').classList.remove('hidden');
+    
+    const app = document.getElementById('app');
+    app.style.setProperty('display', 'flex', 'important');
+    app.classList.remove('hidden');
 
     document.getElementById('me-avatar').textContent = this.user.username.charAt(0).toUpperCase();
     document.getElementById('me-name').textContent = this.user.username;
@@ -726,6 +801,8 @@ class ZapChat {
     const modal = document.getElementById('call-modal');
     modal.classList.remove('hidden');
     modal.setAttribute('aria-hidden', 'false');
+    modal.style.setProperty('display', 'flex', 'important');
+    
     document.getElementById('call-title-text').textContent =
       callType === 'video' ? `Video Call with ${withUser}` : `Voice Call with ${withUser}`;
     document.getElementById('call-status-text').textContent = statusText;
@@ -740,6 +817,8 @@ class ZapChat {
     const modal = document.getElementById('call-modal');
     modal.classList.add('hidden');
     modal.setAttribute('aria-hidden', 'true');
+    modal.style.display = 'none';
+    
     document.getElementById('call-remote-grid').innerHTML =
       '<div class="call-empty" id="call-empty"><i class="fas fa-user-group"></i><p>Waiting for the other side to join…</p></div>';
     document.getElementById('call-local-video').srcObject = null;
