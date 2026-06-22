@@ -137,22 +137,22 @@ class ZapChat {
       errEl.textContent = 'Please fill all fields.'; 
       return; 
     }
-    
-    const btn = document.getElementById('register-btn');
-    btn.style.opacity = '0.6';
-    
-    try {
-      const res = await fetch(`${API}/api/register`, {
-        method: 'POST', 
+   try {
+      const response = await fetch(`${BACKEND_URL}/api/register`, { //  FIXED
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
-      const data = await res.json();
       
-      if (!res.ok) { 
-        errEl.textContent = data.error; 
-        return; 
-      }
+      const data = await response.json(); //  FIXED: matches 'response'
+      
+      if (!response.ok) { //  FIXED: matches 'response'
+        errEl.textContent = data.error || 'Registration failed';
+        const btn = document.getElementById('register-btn');
+        if (btn) btn.style.opacity = '1';
+        return;
+      } 
+ 
       
       // ─── REGISTRATION SUCCESS FIX ─────────────────────────
       if (data.token) {
