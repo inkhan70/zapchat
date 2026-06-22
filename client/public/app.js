@@ -45,8 +45,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 return;
             }
 
-            // Select endpoint based on active tab state
-            const endpoint = isSignUpMode ? "/api/auth/register" : "/api/auth/login";
+            // ✅ FIXED: Routes matched directly to your index.js backend definitions
+            const endpoint = isSignUpMode ? "/api/register" : "/api/login";
             
             try {
                 // Disable button and provide visual feedback during processing
@@ -64,7 +64,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 const data = await response.json();
 
                 if (!response.ok) {
-                    throw new Error(data.message || "Authentication failed");
+                    throw new Error(data.error || data.message || "Authentication failed");
                 }
 
                 alert(isSignUpMode ? "Registration Successful! Please Sign In." : "Logged in successfully!");
@@ -85,3 +85,32 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 });
+
+/**
+ * ✅ NEW: Secure WebRTC Initialization helper function.
+ * Call this function whenever you need to start a video/audio connection stream.
+ */
+async function initializeSecurePeerConnection() {
+    try {
+        const token = localStorage.getItem("token");
+        // Fetch credentials from your own backend proxy to hide the API Key
+        const response = await fetch(`${BACKEND_URL}/api/turn-credentials`, {
+            headers: {
+                "Authorization": `Bearer ${token}`
+            }
+        });
+        
+        if (!response.ok) throw new Error("Could not fetch TURN configuration from server.");
+        const iceServers = await response.json();
+
+        // Pass the safe backend response data into the RTCPeerConnection instantiation
+        const myPeerConnection = new RTCPeerConnection({
+            iceServers: iceServers
+        });
+
+        console.log("WebRTC infrastructure bound and initialized securely.");
+        return myPeerConnection;
+    } catch (error) {
+        console.error("Failed to establish secure video lines:", error);
+    }
+}
