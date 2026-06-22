@@ -10,9 +10,7 @@
   <link rel="stylesheet" href="style.css" />
 
   <!-- Metered Video SDK — exposes the global `Metered` namespace.
-       See https://www.metered.ca/docs/llms-video-sdk.txt
-       Note: the SDK global is `Metered` (not `MeteredVideo`). We instantiate
-       via `new Metered.Meeting()` — see app.js. -->
+       Used via `new Metered.Meeting()` in app.js. -->
   <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
 </head>
 <body>
@@ -169,7 +167,6 @@
   <div class="call-modal-backdrop"></div>
 
   <div class="call-modal-inner">
-    <!-- Header: room name + status pill -->
     <div class="call-header">
       <div class="call-title">
         <i class="fas fa-bolt"></i>
@@ -181,7 +178,6 @@
       </div>
     </div>
 
-    <!-- Stage: remote video grid + local PIP -->
     <div class="call-stage">
       <div class="call-remote-grid" id="call-remote-grid">
         <div class="call-empty" id="call-empty">
@@ -196,7 +192,6 @@
       </div>
     </div>
 
-    <!-- Sidebar: live participants roster -->
     <aside class="call-roster" id="call-roster">
       <div class="call-roster-title">
         <i class="fas fa-users"></i>
@@ -206,7 +201,6 @@
       <ul class="call-roster-list" id="call-roster-list"></ul>
     </aside>
 
-    <!-- Controls -->
     <div class="call-controls">
       <button class="call-ctrl" id="call-mute-btn" title="Mute / Unmute mic">
         <i class="fas fa-microphone"></i>
