@@ -1,8 +1,8 @@
-// CONFIGURATION: Pointing directly to your live Back4App instance
+// CONFIGURATION: Points directly to your active Back4App server instance
 const BACKEND_URL = "https://echochat-m8tjh7ss.b4a.run"; 
 
 document.addEventListener("DOMContentLoaded", () => {
-    console.log("ZapChat Frontend Initialized Successfully.");
+    console.log("ZapChat Frontend Initialized Successfully via ES Modules.");
 
     // DOM Elements
     const signInTab = document.getElementById("auth-signin-tab");
@@ -13,7 +13,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     let isSignUpMode = false;
 
-    // Tab Switching Logic
+    // Tab Switching Layout Logic
     if (signInTab && signUpTab) {
         signInTab.addEventListener("click", () => {
             isSignUpMode = false;
@@ -32,7 +32,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    // Form Submission Handling (Using standard browser fetch)
+    // Authentication Form Submission Handling
     if (authForm) {
         authForm.addEventListener("submit", async (e) => {
             e.preventDefault();
@@ -45,9 +45,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 return;
             }
 
+            // Select endpoint based on active tab state
             const endpoint = isSignUpMode ? "/api/auth/register" : "/api/auth/login";
             
             try {
+                // Disable button and provide visual feedback during processing
                 authSubmitBtn.disabled = true;
                 authSubmitBtn.textContent = "Processing...";
 
@@ -66,7 +68,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
 
                 alert(isSignUpMode ? "Registration Successful! Please Sign In." : "Logged in successfully!");
+                
                 if (!isSignUpMode && data.token) {
+                    // Secure token storage for subsequent authenticated requests
                     localStorage.setItem("token", data.token);
                 }
 
@@ -74,6 +78,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 console.error("Authentication Error:", error);
                 alert(error.message);
             } finally {
+                // Re-enable interface components post-request cycle
                 authSubmitBtn.disabled = false;
                 authSubmitBtn.innerHTML = isSignUpMode ? 'Sign Up <span class="arrow">→</span>' : 'Sign In <span class="arrow">→</span>';
             }
