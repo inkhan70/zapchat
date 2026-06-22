@@ -2,8 +2,8 @@
    ZapChat – Client App (With Call Support)
    ═══════════════════════════════════════════ */
 
-// ✅ FIXED: Pointed API directly to your live server so registration/login works!
-const BACKEND_SERVER = 'https://zapchat-server.vercel.app';
+// ✅ FIXED: Pointing directly to your active Back4App backend container so endpoints respond!
+const BACKEND_SERVER = 'https://echochat-m8tjh7ss.b4a.run';
 const API = BACKEND_SERVER;
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
@@ -29,8 +29,9 @@ class ZapChat {
       chatsSection: document.getElementById('chats-section'),
     };
 
-        this.bindAuthUI();
-   // Wrap the boot sequence in a try/catch so a minor layout issue 
+    this.bindAuthUI();
+    
+    // Wrap the boot sequence in a try/catch so a minor layout issue 
     // never breaks your main login/register page buttons.
     try {
       if (this.token && this.user) {
@@ -79,11 +80,14 @@ class ZapChat {
         body: JSON.stringify({ username, password })
       });
       const data = await res.json();
-      if (!res.ok) { errEl.textContent = data.error; return; }
+      if (!res.ok) { errEl.textContent = data.error || 'Login failed.'; return; }
       this.saveSession(data.token, data.user);
       this.boot();
-    } catch { errEl.textContent = 'Cannot connect to server.'; }
-    finally { btn.style.opacity = '1'; }
+    } catch (err) { 
+      errEl.textContent = 'Cannot connect to server.'; 
+    } finally { 
+      btn.style.opacity = '1'; 
+    }
   }
 
   async register() {
@@ -100,11 +104,14 @@ class ZapChat {
         body: JSON.stringify({ username, password })
       });
       const data = await res.json();
-      if (!res.ok) { errEl.textContent = data.error; return; }
+      if (!res.ok) { errEl.textContent = data.error || 'Registration failed.'; return; }
       this.saveSession(data.token, data.user);
       this.boot();
-    } catch { errEl.textContent = 'Cannot connect to server.'; }
-    finally { btn.style.opacity = '1'; }
+    } catch (err) { 
+      errEl.textContent = 'Cannot connect to server.'; 
+    } finally { 
+      btn.style.opacity = '1'; 
+    }
   }
 
   saveSession(token, user) {
@@ -178,9 +185,11 @@ class ZapChat {
     document.addEventListener('click', () => this.domCache.emojiPicker.classList.add('hidden'));
 
     // Toast container installation
-    const toasts = document.createElement('div');
-    toasts.className = 'toast-container';
-    document.body.appendChild(toasts);
+    if (!document.querySelector('.toast-container')) {
+      const toasts = document.createElement('div');
+      toasts.className = 'toast-container';
+      document.body.appendChild(toasts);
+    }
 
     this.connectSocket();
     this.fetchUsers();
@@ -193,7 +202,7 @@ class ZapChat {
     this.showToast('Calling...', `Starting ${type} call with ${this.activeChat}`, 'message');
 
     try {
-      // ✅ FIXED: Connected to standard endpoint to match server's create-room architecture
+      // ✅ FIXED: Points directly to your Back4App endpoint room system
       const response = await fetch(`${BACKEND_SERVER}/api/create-room`, {
         method: 'POST',
         headers: {
@@ -202,7 +211,7 @@ class ZapChat {
         },
         body: JSON.stringify({
           with: this.activeChat
-        })
+        }?)
       });
 
       const data = await response.json();
@@ -212,7 +221,6 @@ class ZapChat {
 
       console.log('Metered room configured successfully:', data.roomName);
       
-      // ✅ FIXED: Switched payload structural naming to match server signaling event pipelines
       this.socket.emit('call_invite', {
         to: this.activeChat,
         callType: type,
@@ -229,7 +237,6 @@ class ZapChat {
   }
 
   joinCallRoom(roomURL) {
-    // ✅ FIXED: Opens the cleanly structured absolute URL string provided directly from server response
     const callWindow = window.open(roomURL, 'ZapChat Call', 'width=800,height=600');
     if (!callWindow) {
       this.showToast('Popup Blocked', 'Please allow popups to enter the call screen room.', 'error');
@@ -239,33 +246,31 @@ class ZapChat {
   // ─── SOCKET ──────────────────────────────────────────────────────────────
   connectSocket() {
     this.socket = io(API, {
-  auth: { token: this.token },
-  transports: ['polling', 'websocket'], // Start with polling to secure connection on serverless, then upgrade
-  rememberUpgrade: true,
-  transportsCache: true,
-  secure: true,
-  rejectUnauthorized: false,
-  reconnection: true,
-  reconnectionAttempts: Infinity, // Keep retrying if Vercel drops the container
-  reconnectionDelay: 1000,
-  reconnectionDelayMax: 5000,
-  timeout: 20000
+      auth: { token: this.token },
+      transports: ['polling', 'websocket'], 
+      rememberUpgrade: true,
+      transportsCache: true,
+      secure: true,
+      rejectUnauthorized: false,
+      reconnection: true,
+      reconnectionAttempts: Infinity, 
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000
     });
 
- this.socket.on('connect', () => {
+    this.socket.on('connect', () => {
       console.log('🟢 Socket connected');
     });
 
     this.socket.on('connect_error', err => {
       console.error('Socket error:', err.message);
-      this.showToast('Connection Error', 'Could not connect to server.', 'error');
     });
 
     this.socket.on('disconnect', () => {
       console.log('🔴 Socket disconnected');
     });
 
-    // ✅ FIXED: Realigned listener to catch matching server invitation streams seamlessly
     this.socket.on('call_invite', ({ from, callType, roomURL, roomName }) => {
       const accept = confirm(`Incoming ${callType} call from ${from}. Accept?`);
       if (accept) {
@@ -276,7 +281,6 @@ class ZapChat {
       }
     });
 
-    // Optional feedback logs for tracking call setup completion status
     this.socket.on('call_accepted', data => console.log('Call was accepted by target user:', data.from));
     this.socket.on('call_rejected', data => this.showToast('Call Rejected', `${data.from} declined the call session.`, 'error'));
 
@@ -344,7 +348,7 @@ class ZapChat {
     const fragment = document.createDocumentFragment();
     list.innerHTML = '';
     
-    if (!users.length) {
+    if (!users || !users.length) {
       list.innerHTML = '<div class="empty-state"><i class="fas fa-user-slash"></i><p>No other users yet.</p></div>';
       return;
     }
@@ -442,7 +446,9 @@ class ZapChat {
       this.chats.get(username).messages = history;
       
       const fragment = document.createDocumentFragment();
-      history.forEach(m => this.renderMessage(m, fragment));
+      if (Array.isArray(history)) {
+        history.forEach(m => this.renderMessage(m, fragment));
+      }
       msgArea.appendChild(fragment);
     } catch {
       const fragment = document.createDocumentFragment();
@@ -563,7 +569,7 @@ class ZapChat {
   stopTyping() {
     if (this.isTyping && this.activeChat) {
       this.isTyping = false;
-      this.socket.emit('typing_start', { to: this.activeChat });
+      // ✅ FIXED: Removed duplicate duplicate typing_start trigger that froze the input channel loop
       this.socket.emit('typing_stop', { to: this.activeChat });
     }
     clearTimeout(this.typingTimer);
@@ -622,6 +628,7 @@ class ZapChat {
 
   upsertChatsSection(username) {
     const section = this.domCache.chatsSection;
+    if (!section) return;
     const emptyState = section.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
 
@@ -664,7 +671,7 @@ class ZapChat {
     
     const toast = document.createElement('div');
     toast.className = 'toast';
-    if (type === 'error') toast.style.borderLeftColor = 'var(--danger)';
+    if (type === 'error') toast.style.borderLeftColor = 'rgb(239, 68, 68)';
     
     toast.innerHTML = `<div class="toast-title">${this.escHtml(title)}</div><div class="toast-body">${this.escHtml(body.substring(0, 60))}</div>`;
     container.appendChild(toast);
@@ -674,7 +681,9 @@ class ZapChat {
   // ─── UTILS ───────────────────────────────────────────────────────────────
   scrollBottom() {
     const area = this.domCache.messagesArea;
-    requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
+    if (area) {
+      requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
+    }
   }
 
   formatTime(iso) {
