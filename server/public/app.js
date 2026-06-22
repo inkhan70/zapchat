@@ -1,429 +1,809 @@
-require('dotenv').config();
-const express   = require('express');
-const http      = require('http');
-const { Server } = require('socket.io');
-const cors      = require('cors');
-const bcrypt    = require('bcryptjs');
-const jwt       = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
-const path      = require('path');
-const mongoose  = require('mongoose');
+/* ═══════════════════════════════════════════
+   ZapChat – Client App
+   ═══════════════════════════════════════════ */
 
-// ─── Environment ─────────────────────────────────────────────────────────────
-const JWT_SECRET   = process.env.JWT_SECRET   || 'zapchat_super_secret_key_2024';
-const PORT         = process.env.PORT         || 5000;
-const MONGODB_URI  = process.env.MONGODB_URI;
+// Frontend is hosted on Vercel; backend lives on Back4app — these are
+// different origins, so API calls must point at the Back4app URL
+// explicitly. Relative paths would resolve against Vercel's own domain
+// and silently fail (no /api routes exist there).
+const API = 'https://echochat-l0vo4zyg.b4a.run';
 
-// ✅ FIXED: Standardized configuration names to guarantee fallback safety
-const METERED_APP_DOMAIN = process.env.METERED_DOMAIN || process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live';
-const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY;
-const METERED_API_BASE   = `https://${METERED_APP_DOMAIN.replace(/\/$/, '')}/api/v1`;
+const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
-// Explicit allowed-origin list:
-const ALLOWED_ORIGINS = [
-  'https://echochat-fvq5kwvs.b4a.run',
-  'https://zapchat-server.vercel.app',
-  'https://zapchat-server-inkhan.vercel.app',
-  'http://localhost:3000',
-  'http://localhost:5000',
-  'http://127.0.0.1:5000',
-];
+class ZapChat {
+  constructor() {
+    this.socket     = null;
+    this.token      = localStorage.getItem('zc_token');
+    this.user       = JSON.parse(localStorage.getItem('zc_user') || 'null');
+    this.activeChat = null;
+    this.chats      = new Map();
+    this.onlineSet  = new Set();
+    this.typingTimer = null;
+    this.isTyping   = false;
 
-function corsOriginValidator(origin, callback) {
-  if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-    callback(null, origin || true);
-  } else {
-    callback(new Error(`CORS policy: origin '${origin}' is not allowed`));
-  }
-}
+    // Call state
+    this.meeting        = null;
+    this.pendingCall     = null;
+    this.incomingCall    = null;
+    this.currentCallWith = null;
+    this.isMuted    = false;
+    this.isCamOff   = false;
 
-// ─── Express App & HTTP Server ───────────────────────────────────────────────
-const app    = express();
-const server = http.createServer(app);
-
-// ─── MongoDB ─────────────────────────────────────────────────────────────────
-let isMongoConnected = false;
-
-if (MONGODB_URI) {
-  mongoose.connect(MONGODB_URI, {
-    maxPoolSize:     10,
-    minPoolSize:     2,
-    socketTimeoutMS: 45000,
-  })
-  .then(() => { isMongoConnected = true; console.log('✅ MongoDB connected'); })
-  .catch(err => console.error('❌ MongoDB error:', err.message));
-
-  mongoose.connection.on('disconnected', () => {
-    isMongoConnected = false;
-    console.warn('⚠️ MongoDB disconnected — falling back to in-memory storage until reconnected');
-  });
-  mongoose.connection.on('reconnected', () => {
-    isMongoConnected = true;
-    console.log('✅ MongoDB reconnected');
-  });
-} else {
-  console.warn('⚠️ No MONGODB_URI set — running in IN-MEMORY mode permanently.');
-}
-
-// ─── Schemas & Models ────────────────────────────────────────────────────────
-const UserSchema = new mongoose.Schema({
-  id:           { type: String, required: true, unique: true },
-  username:     { type: String, required: true, unique: true, index: true },
-  passwordHash: { type: String, required: true },
-  avatar:       { type: String },
-  status:       { type: String, default: 'Hey there! I am using ZapChat.' },
-  createdAt:    { type: Date, default: Date.now },
-});
-
-const MessageSchema = new mongoose.Schema({
-  id:        { type: String, required: true, unique: true },
-  roomId:    { type: String, required: true },
-  from:      { type: String, required: true },
-  to:        { type: String, required: true },
-  text:      { type: String, required: true },
-  timestamp: { type: Date, default: Date.now },
-  read:      { type: Boolean, default: false },
-});
-MessageSchema.index({ roomId: 1, timestamp: 1 });
-MessageSchema.index({ roomId: 1, to: 1, read: 1 });
-
-const UserModel    = mongoose.models.User    || mongoose.model('User',    UserSchema);
-const MessageModel = mongoose.models.Message || mongoose.model('Message', MessageSchema);
-
-// ─── In-Memory Fallback ──────────────────────────────────────────────────────
-const users       = new Map();
-const messages    = new Map();
-const onlineUsers = new Map();  // username → socket.id
-
-// ─── Express Middleware ──────────────────────────────────────────────────────
-app.use(cors({
-  origin:      corsOriginValidator,
-  credentials: true,
-  methods:     ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
-app.options('*', cors());
-app.use(express.json());
-
-// Serve bundled frontend static assets
-app.use(express.static(path.join(__dirname, 'public')));
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-function getRoomId(a, b) { return [a, b].sort().join('::'); }
-
-function verifyToken(req, res) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) { res.status(401).json({ error: 'Unauthorized' }); return null; }
-  try {
-    return jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
-  } catch {
-    res.status(401).json({ error: 'Invalid token' }); return null;
-  }
-}
-
-function useDB() {
-  return isMongoConnected && mongoose.connection.readyState === 1;
-}
-
-// ─── REST: Auth ───────────────────────────────────────────────────────────────
-app.post('/api/register', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password)    return res.status(400).json({ error: 'Username and password required' });
-  const clean = username.trim();
-  const dbActive = useDB();
-
-  if (dbActive) {
-    const exists = await UserModel.findOne({ username: clean }).select('_id').lean();
-    if (exists) return res.status(409).json({ error: 'Username already taken' });
-  } else {
-    if (users.has(clean)) return res.status(409).json({ error: 'Username already taken' });
-  }
-
-  const passwordHash = await bcrypt.hash(password, 10);
-  const user = {
-    id: uuidv4(), username: clean, passwordHash,
-    avatar: clean.charAt(0).toUpperCase(),
-    status: 'Hey there! I am using ZapChat.',
-    createdAt: new Date(),
-  };
-
-  if (dbActive) {
-    await UserModel.create(user);
-  } else {
-    users.set(clean, user);
-  }
-
-  const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar, status: user.status } });
-});
-
-app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-
-  const dbActive = useDB();
-  let user;
-  if (dbActive) user = await UserModel.findOne({ username: username.trim() }).lean();
-  else         user = users.get(username.trim());
-
-  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-
-  const valid = await bcrypt.compare(password, user.passwordHash);
-  if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-
-  const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar, status: user.status } });
-});
-
-// ─── REST: Users ──────────────────────────────────────────────────────────────
-app.get('/api/users', async (req, res) => {
-  const decoded = verifyToken(req, res);
-  if (!decoded) return;
-
-  let all;
-  if (useDB()) {
-    all = await UserModel.find({ username: { $ne: decoded.username } })
-      .select('id username avatar status').lean();
-  } else {
-    all = Array.from(users.values()).filter(u => u.username !== decoded.username);
-  }
-
-  res.json(all.map(u => ({
-    id: u.id, username: u.username, avatar: u.avatar, status: u.status,
-    online: onlineUsers.has(u.username),
-  })));
-});
-
-// ─── REST: Messages ───────────────────────────────────────────────────────────
-app.get('/api/messages/:with', async (req, res) => {
-  const decoded = verifyToken(req, res);
-  if (!decoded) return;
-
-  const roomId = getRoomId(decoded.username, req.params.with);
-  let msgs;
-  if (useDB()) {
-    msgs = await MessageModel.find({ roomId })
-      .sort({ timestamp: 1 })
-      .select('id from to text timestamp read').lean();
-  } else {
-    msgs = messages.get(roomId) || [];
-  }
-  res.json(msgs);
-});
-
-// ─── REST: Metered Room Creation ─────────────────────────────────────────────
-app.post('/api/create-room', async (req, res) => {
-  const decoded = verifyToken(req, res);
-  if (!decoded) return;
-
-  if (!METERED_SECRET_KEY) {
-    return res.status(500).json({ error: 'Metered secret key not configured on server.' });
-  }
-
-  const withUser = (req.body && typeof req.body.with === 'string') ? req.body.with.trim() : '';
-  const explicit = (req.body && typeof req.body.roomName === 'string') ? req.body.roomName.trim() : '';
-  
-  // Create a clean room name safely formatted for Metered urls
-  const cleanDomain = METERED_APP_DOMAIN.replace(/\/$/, '');
-  const roomName = (explicit
-    || [decoded.username, withUser].filter(Boolean).sort().join('-').toLowerCase()
-                       .replace(/[^a-z0-9-]/g, '-')
-    || `zc-${decoded.username.toLowerCase()}-${Date.now()}`)
-                      .slice(0, 60);
-  const privacy = (req.body && req.body.privacy === 'private') ? 'private' : 'public';
-
-  try {
-    let room = null;
-    try {
-      const existing = await fetch(
-        `${METERED_API_BASE}/room/${encodeURIComponent(roomName)}?secretKey=${METERED_SECRET_KEY}`
-      );
-      if (existing.ok) room = await existing.json();
-    } catch (_) {}
-
-    if (!room) {
-      const createRes = await fetch(
-        `${METERED_API_BASE}/room?secretKey=${METERED_SECRET_KEY}`,
-        {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roomName,
-            privacy,
-            autoJoin:              true,
-            joinVideoOn:           true,
-            joinAudioOn:           true,
-            enableScreenSharing:   true,
-            enableChat:            true,
-            ejectAtRoomExp:        false,
-          }),
-        }
-      );
-
-      const raw = await createRes.text();
-      if (!createRes.ok) {
-        let detail = raw;
-        try { detail = JSON.parse(raw).message || raw; } catch (_) {}
-        console.error('❌ Metered create-room failed:', createRes.status, detail);
-        return res.status(createRes.status).json({ error: 'Metered create-room failed', detail });
-      }
-      room = JSON.parse(raw);
-    }
-
-    // ✅ FIXED: Stripped potential trailing slashes from outputs to keep URLs clean
-    return res.json({
-      roomName:      room.roomName,
-      roomId:        room._id,
-      privacy:       room.privacy,
-      roomURL:       `${cleanDomain}/${room.roomName}`,
-      appDomain:     cleanDomain,
-      publicURL:     `https://${cleanDomain}/${room.roomName}`,
-      context:       withUser ? { self: decoded.username, with: withUser } : null,
-    });
-  } catch (err) {
-    console.error('❌ /api/create-room error:', err);
-    return res.status(500).json({ error: 'Internal error creating room', detail: err.message });
-  }
-});
-
-// ─── Health Check ─────────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => {
-  res.status(200).json({
-    status:    'UP',
-    database:  useDB() ? 'CONNECTED' : 'FALLBACK_MEMORY',
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// ─── Wildcard SPA Fallback ────────────────────────────────────────────────────
-app.get('*', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// ─── Socket.io Configuration ─────────────────────────────────────────────────
-const io = new Server(server, {
-  cors: {
-    origin:      ALLOWED_ORIGINS,
-    methods:     ['GET', 'POST'],
-    credentials: true,
-  },
-  // ✅ OPTIMIZED FOR VERCEL SERVERLESS RUNTIMES:
-  // Shortened ping intervals to prevent Vercel containers from closing early
-  transports:    ['websocket', 'polling'],
-  pingTimeout:   20000, 
-  pingInterval:  8000,  
-  allowUpgrades: true,
-  cookie:        false,
-});
-
-// ─── Socket Auth Middleware ───────────────────────────────────────────────────
-io.use((socket, next) => {
-  const token = socket.handshake.auth.token;
-  if (!token) return next(new Error('Authentication required'));
-  try {
-    socket.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch { next(new Error('Invalid token')); }
-});
-
-// ─── Socket Event Handlers ────────────────────────────────────────────────────
-io.on('connection', socket => {
-  const { username } = socket.user;
-  onlineUsers.set(username, socket.id);
-  console.log(`✅ ${username} connected via ${socket.conn.transport.name} (${socket.id})`);
-
-  socket.broadcast.emit('user_status', { username, online: true });
-  socket.emit('online_users', Array.from(onlineUsers.keys()));
-
-  socket.on('private_message', async ({ to, text }) => {
-    if (!text?.trim() || !to) return;
-    const msg = {
-      id: uuidv4(), from: username, to,
-      text: text.trim(), timestamp: new Date(), read: false,
+    this.domCache = {
+      messagesArea: document.getElementById('messages-area'),
+      messageInput: document.getElementById('message-input'),
+      chatStatus: document.getElementById('chat-status'),
+      emojiPicker: document.getElementById('emoji-picker'),
+      usersList: document.getElementById('users-list'),
+      chatsSection: document.getElementById('chats-section'),
     };
-    const roomId = getRoomId(username, to);
 
-    if (useDB()) {
-      MessageModel.create({ ...msg, roomId }).catch(err => console.error('DB save error:', err));
-    } else {
-      if (!messages.has(roomId)) messages.set(roomId, []);
-      messages.get(roomId).push(msg);
+    this.bindAuthUI();
+    if (this.token && this.user) this.boot();
+  }
+
+  // ─── AUTH ───────────────────────────────────────────────────────────────
+  bindAuthUI() {
+    document.querySelectorAll('.auth-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const which = tab.dataset.tab;
+        document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        document.querySelectorAll('.auth-panel').forEach(p => p.classList.remove('active'));
+        document.getElementById(which + '-panel').classList.add('active');
+        const slider = document.querySelector('.auth-tab-slider');
+        if (slider) slider.classList.toggle('right', which === 'register');
+      });
+    });
+
+    document.getElementById('login-btn').addEventListener('click', () => this.login());
+    document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') this.login(); });
+
+    document.getElementById('register-btn').addEventListener('click', () => this.register());
+    document.getElementById('reg-password').addEventListener('keydown', e => { if (e.key === 'Enter') this.register(); });
+  }
+
+  async login() {
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errEl = document.getElementById('login-error');
+    errEl.textContent = '';
+    if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
+    const btn = document.getElementById('login-btn');
+    btn.style.opacity = '0.6';
+    try {
+      const res = await fetch(`${API}/api/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+      if (!res.ok) { errEl.textContent = data.error; return; }
+      this.saveSession(data.token, data.user);
+      this.boot();
+    } catch { errEl.textContent = 'Cannot connect to server.'; }
+    finally { btn.style.opacity = '1'; }
+  }
+
+  async register() {
+    const username = document.getElementById('reg-username').value.trim();
+    const password = document.getElementById('reg-password').value;
+    const errEl = document.getElementById('register-error');
+    errEl.textContent = '';
+    if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
+    const btn = document.getElementById('register-btn');
+    btn.style.opacity = '0.6';
+    try {
+      const res = await fetch(`${API}/api/register`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+      if (!res.ok) { errEl.textContent = data.error; return; }
+      this.saveSession(data.token, data.user);
+      this.boot();
+    } catch { errEl.textContent = 'Cannot connect to server.'; }
+    finally { btn.style.opacity = '1'; }
+  }
+
+  saveSession(token, user) {
+    this.token = token;
+    this.user  = user;
+    localStorage.setItem('zc_token', token);
+    localStorage.setItem('zc_user', JSON.stringify(user));
+  }
+
+  logout() {
+    localStorage.removeItem('zc_token');
+    localStorage.removeItem('zc_user');
+    if (this.socket) this.socket.disconnect();
+    location.reload();
+  }
+
+  // ─── BOOT ────────────────────────────────────────────────────────────────
+  boot() {
+    document.getElementById('auth-screen').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+
+    document.getElementById('me-avatar').textContent = this.user.username.charAt(0).toUpperCase();
+    document.getElementById('me-name').textContent = this.user.username;
+
+    document.getElementById('logout-btn').addEventListener('click', () => {
+      if (confirm('Sign out?')) this.logout();
+    });
+
+    document.querySelectorAll('.s-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.s-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        const sec = tab.dataset.section;
+        document.getElementById('chats-section').classList.toggle('hidden', sec !== 'chats');
+        document.getElementById('contacts-section').classList.toggle('hidden', sec !== 'contacts');
+      });
+    });
+
+    document.getElementById('search-input').addEventListener('input', e => this.filterContacts(e.target.value));
+
+    const input = this.domCache.messageInput;
+    input.addEventListener('input', () => this.onInputChange());
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.sendMessage(); }
+    });
+
+    document.getElementById('send-btn').addEventListener('click', () => this.sendMessage());
+    document.getElementById('back-btn').addEventListener('click', () => this.closeChatMobile());
+
+    document.getElementById('voice-call-btn').addEventListener('click', () => this.startCall('audio'));
+    document.getElementById('video-call-btn').addEventListener('click', () => this.startCall('video'));
+
+    document.querySelector('.emoji-btn').addEventListener('click', e => {
+      e.stopPropagation();
+      const picker = this.domCache.emojiPicker;
+      picker.classList.toggle('hidden');
+      if (!picker.children.length) this.buildEmojiPicker();
+    });
+    document.addEventListener('click', () => this.domCache.emojiPicker.classList.add('hidden'));
+
+    const toasts = document.createElement('div');
+    toasts.className = 'toast-container';
+    document.body.appendChild(toasts);
+
+    this.connectSocket();
+    this.fetchUsers();
+  }
+
+  // ─── SOCKET ──────────────────────────────────────────────────────────────
+  connectSocket() {
+    this.socket = io(API, {
+      auth: { token: this.token },
+      transports: ['websocket', 'polling'],
+      secure: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000
+    });
+
+    this.socket.on('connect', () => console.log('🟢 Socket connected'));
+    this.socket.on('connect_error', err => {
+      console.error('Socket error:', err.message);
+      this.showToast('Connection Error', 'Could not connect to server.', 'error');
+    });
+    this.socket.on('disconnect', () => console.log('🔴 Socket disconnected'));
+
+    this.socket.on('online_users', users => {
+      this.onlineSet = new Set(users);
+      this.refreshOnlineStatus();
+    });
+
+    this.socket.on('user_status', ({ username, online }) => {
+      if (online) this.onlineSet.add(username);
+      else this.onlineSet.delete(username);
+      this.refreshOnlineStatus();
+      if (username === this.activeChat) {
+        this.domCache.chatStatus.textContent = online ? '🟢 Online' : '🔒 Encrypted';
+      }
+    });
+
+    this.socket.on('private_message', (msg) => this.receiveMessage(msg));
+    this.socket.on('message_sent', (msg) => this.onMessageSent(msg));
+
+    this.socket.on('typing_start', ({ from }) => {
+      this.ensureChat(from);
+      this.chats.get(from).typing = true;
+      this.updateChatListItem(from);
+      if (this.activeChat === from) this.showTypingIndicator();
+    });
+
+    this.socket.on('typing_stop', ({ from }) => {
+      if (this.chats.has(from)) this.chats.get(from).typing = false;
+      this.updateChatListItem(from);
+      if (this.activeChat === from) this.removeTypingIndicator();
+    });
+
+    this.socket.on('messages_read', ({ by }) => {
+      if (this.chats.has(by)) {
+        const msgs = this.chats.get(by).messages;
+        for (let i = 0; i < msgs.length; i++) {
+          if (msgs[i].from === this.user.username) msgs[i].status = 'read';
+        }
+        if (this.activeChat === by) this.updateReadStatuses();
+      }
+    });
+
+    // Call signaling
+    this.socket.on('call_invite', (data) => this.onIncomingCall(data));
+    this.socket.on('call_accepted', (data) => this.onCallAccepted(data));
+    this.socket.on('call_rejected', () => this.onCallRejected());
+    this.socket.on('call_ended', () => this.endCallUI());
+    this.socket.on('call_failed', ({ reason }) => this.showToast('Call Failed', reason, 'error'));
+  }
+
+  // ─── USERS / CONTACTS ────────────────────────────────────────────────────
+  async fetchUsers() {
+    try {
+      const res = await fetch(`${API}/api/users`, {
+        headers: { Authorization: `Bearer ${this.token}` }
+      });
+      const users = await res.json();
+      this.renderContacts(users);
+    } catch (err) {
+      console.error('Failed to fetch contacts:', err);
     }
+  }
 
-    const recipientSocket = onlineUsers.get(to);
-    if (recipientSocket) io.to(recipientSocket).emit('private_message', msg);
-    socket.emit('message_sent', msg);
-  });
+  renderContacts(users) {
+    const list = this.domCache.usersList;
+    const fragment = document.createDocumentFragment();
+    list.innerHTML = '';
 
-  socket.on('typing_start', ({ to }) => {
-    const sid = onlineUsers.get(to);
-    if (sid) io.to(sid).emit('typing_start', { from: username });
-  });
-
-  socket.on('typing_stop', ({ to }) => {
-    const sid = onlineUsers.get(to);
-    if (sid) io.to(sid).emit('typing_stop', { from: username });
-  });
-
-  socket.on('mark_read', async ({ from }) => {
-    const roomId = getRoomId(username, from);
-    if (useDB()) {
-      MessageModel.updateMany(
-        { roomId, to: username, read: false },
-        { $set: { read: true } }
-      ).catch(err => console.error('mark_read error:', err));
-    } else {
-      (messages.get(roomId) || []).forEach(m => { if (m.to === username) m.read = true; });
-    }
-    const senderSocket = onlineUsers.get(from);
-    if (senderSocket) io.to(senderSocket).emit('messages_read', { by: username });
-  });
-
-  // ─── CALL SIGNALING SYSTEM ──────────────────────────────────────────────────
-  socket.on('call_invite', ({ to, callType, roomURL, roomName }) => {
-    const targetSocket = onlineUsers.get(to);
-    if (!targetSocket) {
-      socket.emit('call_failed', { reason: 'User is offline' });
+    if (!users.length) {
+      list.innerHTML = '<div class="empty-state"><i class="fas fa-user-slash"></i><p>No other users yet.</p></div>';
       return;
     }
-    // Forward signaling payload precisely to the recipient
-    io.to(targetSocket).emit('call_invite', {
-      from: username,
-      callType,   
-      roomURL,
-      roomName,
+
+    users.forEach(u => {
+      if (this.onlineSet.has(u.username)) u.online = true;
+      fragment.appendChild(this.createContactEl(u, false));
     });
-  });
 
-  socket.on('call_accept', ({ to, roomURL, roomName }) => {
-    const callerSocket = onlineUsers.get(to);
-    if (callerSocket) {
-      io.to(callerSocket).emit('call_accepted', { from: username, roomURL, roomName });
+    list.appendChild(fragment);
+  }
+
+  createContactEl(user, isChatItem = false) {
+    const div = document.createElement('div');
+    div.className = 'contact-item';
+    div.dataset.username = user.username;
+
+    const isOnline = this.onlineSet.has(user.username);
+    const chatData = this.chats.get(user.username);
+    const lastMsg  = chatData?.lastMsg || user.status || 'Start a conversation';
+    const lastTime = chatData?.lastTime || '';
+    const unread   = chatData?.unread || 0;
+    const typing   = chatData?.typing || false;
+
+    div.innerHTML = `
+      <div class="c-avatar ${isOnline ? 'online' : ''}">${user.username.charAt(0).toUpperCase()}</div>
+      <div class="c-info">
+        <div class="c-name">${user.username}</div>
+        <div class="c-last ${typing ? 'typing' : ''}">${typing ? '✍️ typing…' : this.escHtml(lastMsg)}</div>
+      </div>
+      <div class="c-meta">
+        <div class="c-time">${lastTime ? this.formatTime(lastTime) : ''}</div>
+        ${unread ? `<div class="c-badge">${unread > 9 ? '9+' : unread}</div>` : ''}
+      </div>
+    `;
+    div.addEventListener('click', () => this.openChat(user.username));
+    return div;
+  }
+
+  refreshOnlineStatus() {
+    const items = this.domCache.usersList.getElementsByClassName('contact-item');
+    for (let i = 0; i < items.length; i++) {
+      const un = items[i].dataset.username;
+      const avatar = items[i].querySelector('.c-avatar');
+      if (avatar) avatar.classList.toggle('online', this.onlineSet.has(un));
     }
-  });
+  }
 
-  socket.on('call_reject', ({ to }) => {
-    const callerSocket = onlineUsers.get(to);
-    if (callerSocket) {
-      io.to(callerSocket).emit('call_rejected', { from: username });
+  filterContacts(q) {
+    const searchString = q.toLowerCase();
+    document.querySelectorAll('.contact-item').forEach(el => {
+      const name = el.dataset.username?.toLowerCase() || '';
+      el.style.display = name.includes(searchString) ? '' : 'none';
+    });
+  }
+
+  ensureChat(username) {
+    if (!this.chats.has(username)) {
+      this.chats.set(username, { messages: [], unread: 0, lastMsg: '', lastTime: '', typing: false });
     }
-  });
+  }
 
-  socket.on('call_end', ({ to }) => {
-    const otherSocket = onlineUsers.get(to);
-    if (otherSocket) {
-      io.to(otherSocket).emit('call_ended', { from: username });
+  // ─── OPEN / CLOSE CHAT ───────────────────────────────────────────────────
+  async openChat(username) {
+    if (this.activeChat === username) return;
+
+    this.activeChat = username;
+    this.ensureChat(username);
+
+    this.chats.get(username).unread = 0;
+    this.socket.emit('mark_read', { from: username });
+
+    document.getElementById('chat-name').textContent = username;
+    document.getElementById('chat-avatar').textContent = username.charAt(0).toUpperCase();
+    this.domCache.chatStatus.textContent = this.onlineSet.has(username) ? '🟢 Online' : '🔒 Encrypted';
+
+    document.getElementById('chat-empty').classList.add('hidden');
+    document.getElementById('active-chat').classList.remove('hidden');
+
+    document.querySelector('.chat-panel').classList.add('visible');
+    document.querySelector('.sidebar').classList.add('hidden-mobile');
+
+    document.querySelectorAll('.contact-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.username === username);
+    });
+
+    const msgArea = this.domCache.messagesArea;
+    msgArea.innerHTML = '<div class="messages-date-divider"><span>Today</span></div>';
+
+    try {
+      const res = await fetch(`${API}/api/messages/${username}`, {
+        headers: { Authorization: `Bearer ${this.token}` }
+      });
+      const history = await res.json();
+      this.chats.get(username).messages = history;
+
+      const fragment = document.createDocumentFragment();
+      history.forEach(m => this.renderMessage(m, fragment));
+      msgArea.appendChild(fragment);
+    } catch {
+      const fragment = document.createDocumentFragment();
+      this.chats.get(username).messages.forEach(m => this.renderMessage(m, fragment));
+      msgArea.appendChild(fragment);
     }
-  });
 
-  socket.on('disconnect', reason => {
-    onlineUsers.delete(username);
-    console.log(`🔴 ${username} disconnected: ${reason}`);
-    socket.broadcast.emit('user_status', { username, online: false });
-  });
-});
+    this.scrollBottom();
+    this.domCache.messageInput.focus();
 
-// ─── Start ────────────────────────────────────────────────────────────────────
-server.listen(PORT, () => {
-  console.log(`🚀 ZapChat server running on port ${PORT}`);
+    this.removeTypingIndicator();
+    if (this.chats.get(username).typing) this.showTypingIndicator();
+
+    this.updateChatListItem(username);
+  }
+
+  closeChatMobile() {
+    document.querySelector('.chat-panel').classList.remove('visible');
+    document.querySelector('.sidebar').classList.remove('hidden-mobile');
+    this.activeChat = null;
+  }
+
+  // ─── MESSAGES ────────────────────────────────────────────────────────────
+  sendMessage() {
+    const input = this.domCache.messageInput;
+    const text = input.value.trim();
+    if (!text || !this.activeChat) return;
+
+    this.socket.emit('private_message', { to: this.activeChat, text });
+    input.value = '';
+    input.style.height = 'auto';
+
+    this.stopTyping();
+  }
+
+  onMessageSent(msg) {
+    this.ensureChat(msg.to);
+    const chat = this.chats.get(msg.to);
+    msg.status = 'sent';
+    chat.messages.push(msg);
+    chat.lastMsg  = msg.text;
+    chat.lastTime = msg.timestamp;
+
+    if (this.activeChat === msg.to) {
+      this.renderMessage(msg, this.domCache.messagesArea);
+      this.scrollBottom();
+    }
+    this.updateChatListItem(msg.to);
+  }
+
+  receiveMessage(msg) {
+    this.ensureChat(msg.from);
+    const chat = this.chats.get(msg.from);
+    msg.status = 'received';
+    chat.messages.push(msg);
+    chat.lastMsg  = msg.text;
+    chat.lastTime = msg.timestamp;
+
+    if (this.activeChat === msg.from) {
+      this.removeTypingIndicator();
+      this.renderMessage(msg, this.domCache.messagesArea);
+      this.scrollBottom();
+      this.socket.emit('mark_read', { from: msg.from });
+    } else {
+      chat.unread = (chat.unread || 0) + 1;
+      this.showToast(msg.from, msg.text);
+    }
+
+    this.updateChatListItem(msg.from);
+  }
+
+  renderMessage(msg, targetContainer) {
+    const isSent = msg.from === this.user.username;
+    const row = document.createElement('div');
+    row.className = `msg-row ${isSent ? 'sent' : 'received'}`;
+    row.dataset.id = msg.id;
+
+    const statusIcon = isSent
+      ? `<span class="msg-status ${msg.status || 'sent'}">
+           ${msg.status === 'read' ? '✓✓' : '✓'}
+         </span>`
+      : '';
+
+    row.innerHTML = `
+      <div class="msg-bubble">
+        <div class="msg-text">${this.escHtml(msg.text)}</div>
+        <div class="msg-meta">
+          <span class="msg-time">${this.formatTime(msg.timestamp)}</span>
+          ${statusIcon}
+        </div>
+      </div>
+    `;
+    targetContainer.appendChild(row);
+  }
+
+  updateReadStatuses() {
+    this.domCache.messagesArea.querySelectorAll('.msg-row.sent .msg-status').forEach(el => {
+      el.className = 'msg-status read';
+      el.textContent = '✓✓';
+    });
+  }
+
+  // ─── TYPING ──────────────────────────────────────────────────────────────
+  onInputChange() {
+    const input = this.domCache.messageInput;
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+
+    if (!this.activeChat) return;
+    if (!this.isTyping) {
+      this.isTyping = true;
+      this.socket.emit('typing_start', { to: this.activeChat });
+    }
+    clearTimeout(this.typingTimer);
+    this.typingTimer = setTimeout(() => this.stopTyping(), 2000);
+  }
+
+  stopTyping() {
+    if (this.isTyping && this.activeChat) {
+      this.isTyping = false;
+      this.socket.emit('typing_start', { to: this.activeChat });
+      this.socket.emit('typing_stop', { to: this.activeChat });
+    }
+    clearTimeout(this.typingTimer);
+  }
+
+  showTypingIndicator() {
+    if (document.getElementById('typing-indicator')) return;
+    const row  = document.createElement('div');
+    row.className = 'msg-row received typing-indicator';
+    row.id = 'typing-indicator';
+    row.innerHTML = `<div class="msg-bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>`;
+    this.domCache.messagesArea.appendChild(row);
+    this.scrollBottom();
+  }
+
+  removeTypingIndicator() {
+    document.getElementById('typing-indicator')?.remove();
+  }
+
+  // ─── CHAT LIST MANAGEMENT ─────────────────────────────────────────────────
+  updateChatListItem(username) {
+    const chat = this.chats.get(username);
+    const isOnline = this.onlineSet.has(username);
+
+    const containers = [this.domCache.chatsSection, document.getElementById('contacts-section')];
+
+    containers.forEach(container => {
+      if (!container) return;
+      const item = container.querySelector(`.contact-item[data-username="${username}"]`);
+      if (item) {
+        const avatar = item.querySelector('.c-avatar');
+        if (avatar) avatar.className = `c-avatar ${isOnline ? 'online' : ''}`;
+
+        const lastEl = item.querySelector('.c-last');
+        if (lastEl) {
+          lastEl.className = `c-last ${chat?.typing ? 'typing' : ''}`;
+          lastEl.textContent = chat?.typing ? '✍️ typing…' : (chat?.lastMsg || 'Start a conversation');
+        }
+
+        const timeEl = item.querySelector('.c-time');
+        if (timeEl) timeEl.textContent = chat?.lastTime ? this.formatTime(chat.lastTime) : '';
+
+        const badge = item.querySelector('.c-badge');
+        if (badge) badge.remove();
+        if (chat?.unread) {
+          const b = document.createElement('div');
+          b.className = 'c-badge';
+          b.textContent = chat.unread > 9 ? '9+' : chat.unread;
+          item.querySelector('.c-meta')?.appendChild(b);
+        }
+      }
+    });
+
+    this.upsertChatsSection(username);
+  }
+
+  upsertChatsSection(username) {
+    const section = this.domCache.chatsSection;
+    const emptyState = section.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    const existingEntry = section.querySelector(`.contact-item[data-username="${username}"]`);
+
+    if (existingEntry) {
+      if (section.firstChild === existingEntry) return;
+      existingEntry.remove();
+    }
+
+    const el = this.createContactEl({ username }, true);
+    section.insertBefore(el, section.firstChild);
+  }
+
+  // ─── EMOJI ───────────────────────────────────────────────────────────────
+  buildEmojiPicker() {
+    const picker = this.domCache.emojiPicker;
+    const fragment = document.createDocumentFragment();
+
+    EMOJIS.forEach(em => {
+      const btn = document.createElement('span');
+      btn.className = 'emoji-btn-item';
+      btn.textContent = em;
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const input = this.domCache.messageInput;
+        input.value += em;
+        input.focus();
+        picker.classList.add('hidden');
+      });
+      fragment.appendChild(btn);
+    });
+    picker.appendChild(fragment);
+  }
+
+  // ─── CALLING ─────────────────────────────────────────────────────────────
+  async startCall(callType) {
+    if (!this.activeChat) return;
+    const toUser = this.activeChat;
+
+    try {
+      const res = await fetch(`${API}/api/create-room`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.token}`,
+        },
+        body: JSON.stringify({ with: toUser }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        this.showToast('Call Failed', data.error || 'Could not create room', 'error');
+        return;
+      }
+
+      this.pendingCall = { with: toUser, callType, roomURL: data.roomURL, roomName: data.roomName };
+      this.socket.emit('call_invite', {
+        to: toUser,
+        callType,
+        roomURL: data.roomURL,
+        roomName: data.roomName,
+      });
+
+      this.openCallModal(callType, toUser, 'Calling…');
+    } catch (err) {
+      console.error('startCall error:', err);
+      this.showToast('Call Failed', 'Could not reach server.', 'error');
+    }
+  }
+
+  onIncomingCall({ from, callType, roomURL, roomName }) {
+    this.incomingCall = { from, callType, roomURL, roomName };
+    const label = callType === 'video' ? 'Video call' : 'Voice call';
+    const accept = confirm(`${label} from ${from}. Accept?`);
+
+    if (accept) {
+      this.socket.emit('call_accept', { to: from, roomURL, roomName });
+      this.joinCall(callType, from, roomURL);
+    } else {
+      this.socket.emit('call_reject', { to: from });
+    }
+    this.incomingCall = null;
+  }
+
+  onCallAccepted({ from, roomURL }) {
+    if (!this.pendingCall) return;
+    this.joinCall(this.pendingCall.callType, from, roomURL);
+  }
+
+  onCallRejected() {
+    this.closeCallModal();
+    this.pendingCall = null;
+    this.showToast('Call Declined', 'The other user declined the call.');
+  }
+
+  // Handles both call types AND laptops/devices with no working camera.
+  // getUserMedia({video:true}) throws NotFoundError/NotReadableError when no
+  // camera exists — we catch that and fall back to audio-only rather than
+  // letting the whole call drop.
+  async joinCall(callType, withUser, roomURL) {
+    this.openCallModal(callType, withUser, 'Connecting…');
+    this.currentCallWith = withUser;
+
+    try {
+      this.meeting = new Metered.Meeting();
+      await this.meeting.join({ roomURL, name: this.user.username });
+
+      await this.meeting.startAudio();
+
+      if (callType === 'video') {
+        try {
+          await this.meeting.startVideo();
+        } catch (camErr) {
+          console.warn('Camera unavailable, falling back to audio-only:', camErr);
+          this.showToast('Audio Only', 'No webcam detected. Continuing as a voice call.', 'message');
+          document.getElementById('call-title-text').textContent = `Voice Call with ${withUser}`;
+        }
+      }
+
+      document.getElementById('call-status-text').textContent = 'Connected';
+      document.getElementById('call-status-dot').classList.add('connected');
+
+      this.meeting.on('localTrackStarted', (item) => {
+        if (item.type === 'video') {
+          const stream = new MediaStream([item.track]);
+          document.getElementById('call-local-video').srcObject = stream;
+        }
+      });
+
+      this.meeting.on('remoteTrackStarted', (item) => {
+        document.getElementById('call-empty')?.remove();
+        const grid = document.getElementById('call-remote-grid');
+
+        if (item.type === 'video') {
+          let videoEl = document.getElementById(`remote-${item.streamId}`);
+          if (!videoEl) {
+            videoEl = document.createElement('video');
+            videoEl.id = `remote-${item.streamId}`;
+            videoEl.autoplay = true;
+            videoEl.playsInline = true;
+            videoEl.className = 'call-remote-video';
+            grid.appendChild(videoEl);
+          }
+          videoEl.srcObject = new MediaStream([item.track]);
+        } else if (item.type === 'audio') {
+          let audioEl = document.getElementById(`remote-audio-${item.streamId}`);
+          if (!audioEl) {
+            audioEl = document.createElement('audio');
+            audioEl.id = `remote-audio-${item.streamId}`;
+            audioEl.autoplay = true;
+            document.body.appendChild(audioEl);
+          }
+          audioEl.srcObject = new MediaStream([item.track]);
+        }
+      });
+
+      this.meeting.on('remoteTrackStopped', (item) => {
+        document.getElementById(`remote-${item.streamId}`)?.remove();
+        document.getElementById(`remote-audio-${item.streamId}`)?.remove();
+      });
+
+      this.meeting.on('participantLeft', () => {
+        this.showToast('Call Ended', `${withUser} left the call.`);
+        this.endCallUI();
+      });
+
+    } catch (err) {
+      console.error('joinCall error:', err);
+      this.showToast('Call Failed', 'Could not connect to call.', 'error');
+      this.closeCallModal();
+    }
+  }
+
+  hangupCall() {
+    if (this.currentCallWith) {
+      this.socket.emit('call_end', { to: this.currentCallWith });
+    }
+    this.endCallUI();
+  }
+
+  endCallUI() {
+    if (this.meeting) {
+      try { this.meeting.leaveMeeting(); } catch (_) {}
+      this.meeting = null;
+    }
+    this.closeCallModal();
+    this.pendingCall = null;
+    this.currentCallWith = null;
+  }
+
+  openCallModal(callType, withUser, statusText) {
+    const modal = document.getElementById('call-modal');
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+    document.getElementById('call-title-text').textContent =
+      callType === 'video' ? `Video Call with ${withUser}` : `Voice Call with ${withUser}`;
+    document.getElementById('call-status-text').textContent = statusText;
+    document.getElementById('call-status-dot').classList.remove('connected');
+
+    document.getElementById('call-hangup-btn').onclick = () => this.hangupCall();
+    document.getElementById('call-mute-btn').onclick = () => this.toggleMute();
+    document.getElementById('call-cam-btn').onclick = () => this.toggleCamera();
+  }
+
+  closeCallModal() {
+    const modal = document.getElementById('call-modal');
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+    document.getElementById('call-remote-grid').innerHTML =
+      '<div class="call-empty" id="call-empty"><i class="fas fa-user-group"></i><p>Waiting for the other side to join…</p></div>';
+    document.getElementById('call-local-video').srcObject = null;
+  }
+
+  async toggleMute() {
+    if (!this.meeting) return;
+    this.isMuted = !this.isMuted;
+    if (this.isMuted) await this.meeting.stopAudio();
+    else await this.meeting.startAudio();
+    document.getElementById('call-local-mic-off').classList.toggle('hidden', !this.isMuted);
+  }
+
+  async toggleCamera() {
+    if (!this.meeting) return;
+    this.isCamOff = !this.isCamOff;
+    try {
+      if (this.isCamOff) await this.meeting.stopVideo();
+      else await this.meeting.startVideo();
+    } catch (err) {
+      console.warn('Toggle camera failed (likely no camera hardware):', err);
+      this.showToast('No Camera', 'No webcam detected on this device.', 'message');
+      this.isCamOff = true;
+    }
+  }
+
+  // ─── TOASTS ──────────────────────────────────────────────────────────────
+  showToast(title, body, type = 'message') {
+    const container = document.querySelector('.toast-container');
+    if (!container) return;
+
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    if (type === 'error') toast.style.borderLeftColor = 'var(--danger)';
+
+    toast.innerHTML = `<div class="toast-title">${this.escHtml(title)}</div><div class="toast-body">${this.escHtml(body.substring(0, 60))}</div>`;
+    container.appendChild(toast);
+    setTimeout(() => toast.remove(), 4200);
+  }
+
+  // ─── UTILS ───────────────────────────────────────────────────────────────
+  scrollBottom() {
+    const area = this.domCache.messagesArea;
+    requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
+  }
+
+  formatTime(iso) {
+    const d = new Date(iso);
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+
+  escHtml(str) {
+    return String(str)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
+  }
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  window.app = new ZapChat();
 });
