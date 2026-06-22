@@ -79,8 +79,9 @@ class ZapChat {
     btn.style.opacity = '0.6';
     
     try {
-      const res = await fetch(`${API}/api/login`, {
-        method: 'POST', 
+      const response = await fetch(`${BACKEND_URL}/api/login`, { //  FIXED
+
+         method: 'POST', 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
