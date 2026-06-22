@@ -78,17 +78,22 @@ class ZapChat {
     const btn = document.getElementById('login-btn');
     btn.style.opacity = '0.6';
     
-    try {
-      const response = await fetch(`${BACKEND_URL}/api/login`, { //  FIXED
-
-         method: 'POST', 
+       try {
+      // 1. Send the login request to the backend server
+      const response = await fetch(`${BACKEND_URL}/api/login`, {
+        method: 'POST', 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
-      const data = await res.json();
       
-      if (!res.ok) { 
-        errEl.textContent = data.error; 
+      // 2. Parse the response using 'response' instead of 'res'
+      const data = await response.json(); 
+      
+      // 3. Check if the server returned an error state
+      if (!response.ok) { 
+        errEl.textContent = data.error || 'Login failed'; 
+        const btn = document.getElementById('login-btn');
+        if (btn) btn.style.opacity = '1'; // Restore button opacity on failure
         return; 
       }
       
@@ -111,6 +116,8 @@ class ZapChat {
         console.log("Authentication successful. Loading user dashboard...");
         this.boot();
       }
+      // ───────────────
+
       // ───────────────────────────────────────────────────────
       
     } catch (err) {
