@@ -7,7 +7,7 @@
 // explicitly. Relative paths would resolve against Vercel's own domain
 // and silently fail (no /api routes exist there).
 // CONFIGURATION: Points directly to your active Back4App server instance
-const BACKEND_URL = "https://echochat-pjabun7d.b4a.run";
+const BACKEND_URL ="https://echochat-pjabun7d.b4a.run";
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
