@@ -1,5 +1,5 @@
 require('dotenv').config();
-const express   = require('express');
+const express    = require('express');
 const http      = require('http');
 const { Server } = require('socket.io');
 const cors      = require('cors');
@@ -22,12 +22,14 @@ const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 // Explicit allowed-origin list:
 const ALLOWED_ORIGINS = [
   'https://echochat-fvq5kwvs.b4a.run',
+  'https://echochat-m8tjh7ss.b4a.run',
   'https://zapchat-server.vercel.app',
   'https://zapchat-server-inkhan.vercel.app',
   'http://localhost:3000',
   'http://localhost:5000',
   'http://127.0.0.1:5000',
-  ];
+];
+
 // Origin-validator — returns the origin string if it is allowed, false otherwise.
 function corsOriginValidator(origin, callback) {
   if (!origin || ALLOWED_ORIGINS.includes(origin)) {
@@ -211,6 +213,28 @@ app.get('/api/messages/:with', async (req, res) => {
   res.json(msgs);
 });
 
+// ─── ✅ NEW REST: Secure TURN Server Credential Proxy ──────────────────────
+app.get('/api/turn-credentials', async (req, res) => {
+  const decoded = verifyToken(req, res);
+  if (!decoded) return;
+
+  if (!METERED_SECRET_KEY) {
+    return res.status(500).json({ error: 'Metered secret key not configured on server variables.' });
+  }
+
+  try {
+    const response = await fetch(`https://${METERED_APP_DOMAIN}/api/v1/turn/credentials?apiKey=${METERED_SECRET_KEY}`);
+    if (!response.ok) {
+        throw new Error(`Metered provider platform returned status code: ${response.status}`);
+    }
+    const iceServers = await response.json();
+    res.json(iceServers);
+  } catch (err) {
+    console.error('❌ /api/turn-credentials error:', err);
+    return res.status(500).json({ error: 'Internal error loading secure signaling tokens', detail: err.message });
+  }
+});
+
 // ─── REST: Metered Room Creation ─────────────────────────────────────────────
 app.post('/api/create-room', async (req, res) => {
   const decoded = verifyToken(req, res);
@@ -225,7 +249,7 @@ app.post('/api/create-room', async (req, res) => {
   
   const roomName = (explicit
     || [decoded.username, withUser].filter(Boolean).sort().join('-').toLowerCase()
-                       .replace(/[^a-z0-9-]/g, '-')
+                               .replace(/[^a-z0-9-]/g, '-')
     || `zc-${decoded.username.toLowerCase()}-${Date.now()}`)
                       .slice(0, 60);
   const privacy = (req.body && req.body.privacy === 'private') ? 'private' : 'public';
@@ -304,7 +328,6 @@ const io = new Server(server, {
     methods:     ['GET', 'POST'],
     credentials: true,
   },
-  // Fixed setup: prioritization optimizations for Vercel Serverless runtimes
   transports:    ['websocket', 'polling'],
   pingTimeout:   30000,
   pingInterval:  15000,
@@ -382,7 +405,6 @@ io.on('connection', socket => {
       socket.emit('call_failed', { reason: 'User is offline' });
       return;
     }
-    // Forwarding specific targeting signatures across the pipeline
     io.to(targetSocket).emit('call_invite', {
       from: username,
       callType,   
