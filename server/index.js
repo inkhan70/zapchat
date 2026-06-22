@@ -19,16 +19,13 @@ const METERED_APP_DOMAIN = process.env.METERED_DOMAIN || process.env.METERED_APP
 const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY;
 const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 
-// Explicit allowed-origin list:
 const ALLOWED_ORIGINS = [
-  'https://echochat-fvq5kwvs.b4a.run',
-  'https://echochat-m8tjh7ss.b4a.run',
-  'https://echochat-pjabun7d.b4a.run', // ✅ ADD THIS LINE RIGHT HERE
+  'https://echochat-wf63zbz0.b4a.run', // ✅ ADD THIS LIVE ONE NOW
+  'https://echochat-pjabun7d.b4a.run',
   'https://zapchat-server.vercel.app',
   'https://zapchat-server-inkhan.vercel.app',
   'http://localhost:3000',
-  'http://localhost:5000',
-  'http://127.0.0.1:5000',
+  'http://localhost:5000'
 ];
 // Origin-validator — returns the origin string if it is allowed, false otherwise.
 function corsOriginValidator(origin, callback) {
