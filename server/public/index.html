@@ -9,6 +9,26 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
   <link rel="stylesheet" href="style.css" />
 
+  <!-- Critical fix styles - ensure auth is visible and app/call is hidden on boot -->
+  <style>
+    /* Force auth screen to be visible initially */
+    #auth-screen {
+        display: flex !important;
+    }
+    
+    /* Force main app and call modal to be completely hidden on initial boot */
+    #app,
+    #call-modal {
+        display: none !important;
+    }
+    
+    /* Ensure video elements within call modal are also hidden */
+    #call-modal video,
+    #call-modal .call-stage {
+        display: none !important;
+    }
+  </style>
+
   <!-- Metered Video SDK — exposes the global `Metered` namespace.
        Used via `new Metered.Meeting()` in app.js. -->
   <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
