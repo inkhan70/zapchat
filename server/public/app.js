@@ -79,7 +79,7 @@ class ZapChat {
     btn.style.opacity = '0.6';
     try {
       // 1. Send the login request to the backend server
-     const BACKEND_URL = "https://echochat-pjabun7d.b4a.run";
+    const response = await fetch(`${BACKEND_URL}/api/login`, {
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
