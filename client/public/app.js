@@ -2,10 +2,19 @@
    ZapChat – Client App (With Call Support)
    ═══════════════════════════════════════════ */
 
-// CRITICAL PRODUCTION FIX: Always use relative paths for basic APIs.
-// However, call routing points explicitly to your secure backend.
-const API = '';
-const BACKEND_SERVER = 'https://zapchat-server.vercel.app';
+// ─── Backend API base URL ─────────────────────────────────────────────────────
+// ⚠️  REPLACE BEFORE COMMITTING. Get the URL from:
+//     Railway dashboard → project c3d843e5-f233-4cf2-837e-27860a62187d
+//       → click backend service → Settings → Networking → Public Networking
+//       → copy the *.up.railway.app URL (or click "Generate Domain")
+//
+//   Quick replace once you have it:
+//     sed -i "s|YOUR-SERVICE.up.railway.app|<paste-real-url-here>|" client/public/app.js
+//
+//   Both API and BACKEND_SERVER should be the SAME Railway URL.
+//   (Legacy code split them for Vercel proxy routing.)
+const API = 'https://zapchat-production.up.railway.app';
+const BACKEND_SERVER = 'https://zapchat-production.up.railway.app';
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
