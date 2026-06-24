@@ -13,7 +13,7 @@
 //
 //   Both API and BACKEND_SERVER should be the SAME Railway URL.
 //   (Legacy code split them for Vercel proxy routing.)
-const API = 'https://zapchat-production.up.railway.app';
+const API = 'https://zapchat-5ru.pages.dev';
 const BACKEND_SERVER = 'https://zapchat-production.up.railway.app';
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
