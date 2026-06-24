@@ -27,9 +27,10 @@ const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 //  2. Vercel deployment (secondary / legacy)
 //  3. Local development
 const ALLOWED_ORIGINS = [
-  'https://echochat-fvq5kwvs.b4a.run',
-  'https://zapchat-server.vercel.app',
-  'https://zapchat-server-inkhan.vercel.app',
+  'https://zapchat-5ru.pages.dev',                        // Cloudflare Pages frontend (PRIMARY)
+  'https://echochat-fvq5kwvs.b4a.run',                    // legacy Back4app (remove once fully cut over)
+  'https://zapchat-server.vercel.app',                    // legacy Vercel (DEAD — safe to remove)
+  'https://zapchat-server-inkhan.vercel.app',             // legacy Vercel (remove if unused)
   'http://localhost:3000',
   'http://localhost:5000',
   'http://127.0.0.1:5000',
