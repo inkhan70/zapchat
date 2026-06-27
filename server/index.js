@@ -21,6 +21,7 @@ const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 
 const ALLOWED_ORIGINS = [
   'https://zapchat-5ru.pages.dev',                        // Cloudflare Pages frontend (PRIMARY)
+  'https://zapchat-production.up.railway.app',            // Railway backend's own URL (lets you test by loading it directly)
   'https://echochat-fvq5kwvs.b4a.run',                    // legacy Back4app (remove once fully cut over)
   'https://zapchat-server.vercel.app',                    // legacy Vercel (DEAD — safe to remove)
   'https://zapchat-server-inkhan.vercel.app',             // legacy Vercel (remove if unused)
@@ -436,6 +437,21 @@ io.on('connection', socket => {
     console.log(`🔴 ${username} disconnected: ${reason}`);
     socket.broadcast.emit('user_status', { username, online: false });
   });
+});
+
+// ─── Error handler ────────────────────────────────────────────────────────────
+// Catches anything thrown synchronously in middleware/routes — including the
+// CORS origin-rejection error — and returns JSON instead of Express's default
+// HTML error page. Registered after all routes/sockets, before listen().
+// This is what was previously surfacing to the client as "status 500 /
+// unexpected response": a CORS rejection has no JSON body without this.
+app.use((err, req, res, _next) => {
+  console.error('❌ Unhandled error:', err.message);
+  if (res.headersSent) return;
+  if (err.message && err.message.startsWith('CORS policy')) {
+    return res.status(403).json({ error: 'Origin not allowed by CORS policy.' });
+  }
+  res.status(500).json({ error: 'Internal server error.' });
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
