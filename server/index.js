@@ -15,28 +15,21 @@ const PORT         = process.env.PORT         || 5000;
 const MONGODB_URI  = process.env.MONGODB_URI;
 
 // Metered Video SDK credentials.
-// App domain = the subdomain of your Metered app, e.g. "zapchat-server.metered.live".
-// Secret key = server-side only, loaded from env. Rotate via the Metered
-// dashboard if it's ever exposed (e.g. pasted into a chat, committed to git).
 const METERED_APP_DOMAIN = process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live';
 const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY;
 const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 
-// Explicit allowed-origin list:
-//  1. Back4app production container (primary)
-//  2. Vercel deployment (secondary / legacy)
-//  3. Local development
 const ALLOWED_ORIGINS = [
-  'https://echochat-fvq5kwvs.b4a.run',
-  'https://zapchat-server.vercel.app',
-  'https://zapchat-server-inkhan.vercel.app',
+  'https://zapchat-5ru.pages.dev',                        // Cloudflare Pages frontend (PRIMARY)
+  'https://zapchat-production.up.railway.app',            // Railway backend's own URL (lets you test by loading it directly)
+  'https://echochat-fvq5kwvs.b4a.run',                    // legacy Back4app (remove once fully cut over)
+  'https://zapchat-server.vercel.app',                    // legacy Vercel (DEAD — safe to remove)
+  'https://zapchat-server-inkhan.vercel.app',             // legacy Vercel (remove if unused)
   'http://localhost:3000',
   'http://localhost:5000',
   'http://127.0.0.1:5000',
 ];
 
-// Origin-validator — returns the origin string if it is allowed, false otherwise.
-// Also permits same-origin/static requests that carry no Origin header.
 function corsOriginValidator(origin, callback) {
   if (!origin || ALLOWED_ORIGINS.includes(origin)) {
     callback(null, origin || true);
@@ -45,7 +38,6 @@ function corsOriginValidator(origin, callback) {
   }
 }
 
-// ─── Express App & HTTP Server ───────────────────────────────────────────────
 const app    = express();
 const server = http.createServer(app);
 
@@ -61,11 +53,6 @@ if (MONGODB_URI) {
   .then(() => { isMongoConnected = true; console.log('✅ MongoDB connected'); })
   .catch(err => console.error('❌ MongoDB error:', err.message));
 
-  // Keep isMongoConnected in sync with the actual connection lifecycle —
-  // this matters because a connection can drop AFTER the initial .then()
-  // fires (e.g. network blip, Atlas pausing a free cluster), and without
-  // these listeners isMongoConnected would stay "true" forever even
-  // though queries are silently failing or falling through.
   mongoose.connection.on('disconnected', () => {
     isMongoConnected = false;
     console.warn('⚠️ MongoDB disconnected — falling back to in-memory storage until reconnected');
@@ -115,7 +102,12 @@ app.use(cors({
   methods:     ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-app.options('*', cors());          // Pre-flight pass-through for all routes
+
+// FIXED: a bare '*' wildcard route throws at startup under Express 5
+// (path-to-regexp v6 requires a named wildcard like '*splat', or a RegExp).
+// Using a RegExp here works on both Express 4 and 5, so this isn't a
+// silent landmine if/when the Express version on Railway changes.
+app.options(/.*/, cors());
 app.use(express.json());
 
 // Serve bundled frontend (server/public/) before API routes
@@ -240,16 +232,6 @@ app.get('/api/messages/:with', async (req, res) => {
 });
 
 // ─── REST: Metered Room Creation ─────────────────────────────────────────────
-// POST /api/create-room
-// Body (optional):
-//   { roomName?: string, privacy?: "public"|"private", with?: string }
-//   - If roomName is omitted, a stable name is derived from the caller +
-//     the optional `with` field (sorted usernames) so the same chat always
-//     lands in the same room.
-//
-// Auth: requires a valid Bearer token (same pattern as /api/users, /api/messages).
-// The secret key is never sent to the client — this route is the only place
-// that talks to Metered's REST API directly.
 app.post('/api/create-room', async (req, res) => {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
@@ -268,8 +250,6 @@ app.post('/api/create-room', async (req, res) => {
   const privacy = (req.body && req.body.privacy === 'private') ? 'private' : 'public';
 
   try {
-    // 1) Try to fetch the room first — reuse it if it already exists so a
-    //    returning caller lands in the same room as the original chat.
     let room = null;
     try {
       const existing = await fetch(
@@ -278,7 +258,6 @@ app.post('/api/create-room', async (req, res) => {
       if (existing.ok) room = await existing.json();
     } catch (_) { /* network blip — fall through to create */ }
 
-    // 2) Create the room if missing.
     if (!room) {
       const createRes = await fetch(
         `${METERED_API_BASE}/room?secretKey=${METERED_SECRET_KEY}`,
@@ -333,9 +312,10 @@ app.get('/health', (_req, res) => {
 });
 
 // ─── Wildcard SPA Fallback ────────────────────────────────────────────────────
-// Must be LAST — catches all non-API, non-static deep paths and serves index.html
-// so the browser handles client-side routing without 404s.
-app.get('*', (_req, res) => {
+// FIXED: same Express 5 wildcard issue as the OPTIONS route above — bare
+// '*' throws at startup under path-to-regexp v6. A RegExp catch-all works
+// on both Express 4 and 5.
+app.get(/.*/, (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
@@ -457,6 +437,21 @@ io.on('connection', socket => {
     console.log(`🔴 ${username} disconnected: ${reason}`);
     socket.broadcast.emit('user_status', { username, online: false });
   });
+});
+
+// ─── Error handler ────────────────────────────────────────────────────────────
+// Catches anything thrown synchronously in middleware/routes — including the
+// CORS origin-rejection error — and returns JSON instead of Express's default
+// HTML error page. Registered after all routes/sockets, before listen().
+// This is what was previously surfacing to the client as "status 500 /
+// unexpected response": a CORS rejection has no JSON body without this.
+app.use((err, req, res, _next) => {
+  console.error('❌ Unhandled error:', err.message);
+  if (res.headersSent) return;
+  if (err.message && err.message.startsWith('CORS policy')) {
+    return res.status(403).json({ error: 'Origin not allowed by CORS policy.' });
+  }
+  res.status(500).json({ error: 'Internal server error.' });
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
