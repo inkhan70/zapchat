@@ -146,8 +146,34 @@
     </div>
 
   </main>
+
+  <!-- ─── Call Modal ───────────────────────────────────────────────────────
+       Embedded Metered SDK call UI. Replaces the old popup/iframe approach
+       so the call runs in-page (no popup-blocker issues, full UI control).
+  -->
+  <div id="call-modal" class="call-modal hidden">
+    <div class="call-modal-inner">
+      <div class="call-modal-header">
+        <span id="call-with-name">Calling…</span>
+        <span id="call-status-text" class="call-status-text">Connecting…</span>
+      </div>
+
+      <div class="call-video-area">
+        <video id="remoteVideo" autoplay playsinline class="remote-video"></video>
+        <video id="localVideo" autoplay playsinline muted class="local-video"></video>
+        <audio id="remoteAudio" autoplay></audio>
+      </div>
+
+      <div class="call-controls">
+        <button class="icon-btn" id="call-toggle-mic" title="Mute/Unmute"><i class="fas fa-microphone"></i></button>
+        <button class="icon-btn" id="call-toggle-cam" title="Camera on/off"><i class="fas fa-video"></i></button>
+        <button class="icon-btn end-call-btn" id="call-end-btn" title="End Call"><i class="fas fa-phone-slash"></i></button>
+      </div>
+    </div>
+  </div>
 </div>
 
+<script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
 <script src="app.js"></script>
 </body>
