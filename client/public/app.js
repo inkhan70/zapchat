@@ -25,6 +25,12 @@ class ZapChat {
     this.isTyping   = false;
     this.activeCallRoom = null;   // { roomName, with, callType } while a call is in progress
     this.meeting    = null;       // Metered.Meeting() instance for the active call
+    this.isJoined   = false;      // true only once meeting.join() has actually resolved —
+                                   // this.meeting being non-null is NOT enough, since the
+                                   // instance exists during the "joining" state too, and
+                                   // calling startAudio/startVideo/stopAudio/stopVideo before
+                                   // join() resolves throws "meeting not joined or in the
+                                   // joining state" from the SDK.
     this.micOn      = true;
     this.camOn      = true;
 
@@ -312,6 +318,8 @@ class ZapChat {
         name: this.user.username,
       });
       console.log('Meeting joined', meetingInfo);
+      this.isJoined = true; // only now is it safe to call startAudio/startVideo/toggle methods
+      this.enableCallControls();
 
       // Always share audio.
       try {
@@ -352,6 +360,16 @@ class ZapChat {
     this.domCache.remoteVideo.classList.toggle('hidden', callType !== 'video');
     this.micOn = true;
     this.camOn = true;
+    // Disabled until isJoined flips true — prevents the exact race that
+    // throws "meeting not joined or in the joining state" from the SDK
+    // (tapping mic/cam before meeting.join() has actually resolved).
+    document.getElementById('call-toggle-mic')?.setAttribute('disabled', 'true');
+    document.getElementById('call-toggle-cam')?.setAttribute('disabled', 'true');
+  }
+
+  enableCallControls() {
+    document.getElementById('call-toggle-mic')?.removeAttribute('disabled');
+    document.getElementById('call-toggle-cam')?.removeAttribute('disabled');
   }
 
   closeCallModal() {
@@ -363,20 +381,20 @@ class ZapChat {
   }
 
   toggleMic() {
-    if (!this.meeting) return;
+    if (!this.meeting || !this.isJoined) return;
     this.micOn = !this.micOn;
-    if (this.micOn) this.meeting.startAudio?.();
-    else this.meeting.stopAudio?.();
+    if (this.micOn) this.meeting.startAudio?.().catch(err => console.error('startAudio failed:', err));
+    else this.meeting.stopAudio?.().catch?.(err => console.error('stopAudio failed:', err));
     const btn = document.getElementById('call-toggle-mic');
     btn?.querySelector('i')?.classList.toggle('fa-microphone-slash', !this.micOn);
     btn?.querySelector('i')?.classList.toggle('fa-microphone', this.micOn);
   }
 
   toggleCam() {
-    if (!this.meeting || this.activeCallRoom?.callType !== 'video') return;
+    if (!this.meeting || !this.isJoined || this.activeCallRoom?.callType !== 'video') return;
     this.camOn = !this.camOn;
-    if (this.camOn) this.meeting.startVideo?.();
-    else this.meeting.stopVideo?.();
+    if (this.camOn) this.meeting.startVideo?.().catch(err => console.error('startVideo failed:', err));
+    else this.meeting.stopVideo?.().catch?.(err => console.error('stopVideo failed:', err));
     const btn = document.getElementById('call-toggle-cam');
     btn?.querySelector('i')?.classList.toggle('fa-video-slash', !this.camOn);
     btn?.querySelector('i')?.classList.toggle('fa-video', this.camOn);
@@ -400,6 +418,7 @@ class ZapChat {
       console.error('Error leaving meeting:', err);
     }
     this.meeting = null;
+    this.isJoined = false;
     this.activeCallRoom = null;
     this.closeCallModal();
   }
@@ -434,7 +453,9 @@ class ZapChat {
       if (accept) {
         this.activeCallRoom = { roomName, with: from, callType };
         this.socket.emit('call_accept', { to: from, roomURL, roomName });
-        this.joinCallRoom(roomURL, callType);
+        this.joinCallRoom(roomURL, callType).catch(err => {
+          console.error('Failed to join incoming call:', err);
+        });
       } else {
         this.socket.emit('call_reject', { to: from });
       }
