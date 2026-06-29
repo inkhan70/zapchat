@@ -2,10 +2,14 @@
    ZapChat – Client App (With Call Support)
    ═══════════════════════════════════════════ */
 
-// CRITICAL PRODUCTION FIX: Always use relative paths for basic APIs.
-// However, call routing points explicitly to your secure backend.
-const API = '';
-const BACKEND_SERVER = 'https://zapchat-server.vercel.app';
+// ─── Backend API base URL ─────────────────────────────────────────────────────
+// FIXED: this must point at your Railway BACKEND, not your Cloudflare Pages
+// frontend. zapchat-5ru.pages.dev is a static site with no /api routes and
+// no Socket.io server — that mismatch was the cause of "Cannot connect to
+// server." on signup/login. Both API and BACKEND_SERVER now point at the
+// same Railway URL since there's only one backend.
+const API = 'https://zapchat-production.up.railway.app';
+const BACKEND_SERVER = API; // kept as an alias so existing references below still work
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
@@ -19,6 +23,10 @@ class ZapChat {
     this.onlineSet  = new Set();
     this.typingTimer = null;
     this.isTyping   = false;
+    this.activeCallRoom = null;   // { roomName, with, callType } while a call is in progress
+    this.meeting    = null;       // Metered.Meeting() instance for the active call
+    this.micOn      = true;
+    this.camOn      = true;
 
     // Cache frequent DOM elements for rendering performance
     this.domCache = {
@@ -28,6 +36,12 @@ class ZapChat {
       emojiPicker: document.getElementById('emoji-picker'),
       usersList: document.getElementById('users-list'),
       chatsSection: document.getElementById('chats-section'),
+      callModal: document.getElementById('call-modal'),
+      callWithName: document.getElementById('call-with-name'),
+      callStatusText: document.getElementById('call-status-text'),
+      localVideo: document.getElementById('localVideo'),
+      remoteVideo: document.getElementById('remoteVideo'),
+      remoteAudio: document.getElementById('remoteAudio'),
     };
 
     this.bindAuthUI();
@@ -71,11 +85,19 @@ class ZapChat {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
-      const data = await res.json();
-      if (!res.ok) { errEl.textContent = data.error; return; }
+      // FIXED: guard against non-JSON responses (e.g. a 404/HTML page from a
+      // misconfigured host) instead of letting res.json() throw and falling
+      // into the generic "Cannot connect to server." message every time.
+      let data;
+      try { data = await res.json(); }
+      catch { errEl.textContent = `Server returned an unexpected response (status ${res.status}). Check the API URL.`; return; }
+      if (!res.ok) { errEl.textContent = data.error || `Login failed (status ${res.status}).`; return; }
       this.saveSession(data.token, data.user);
       this.boot();
-    } catch { errEl.textContent = 'Cannot connect to server.'; }
+    } catch (err) {
+      console.error('Login network error:', err);
+      errEl.textContent = 'Cannot connect to server.';
+    }
     finally { btn.style.opacity = '1'; }
   }
 
@@ -92,11 +114,16 @@ class ZapChat {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
-      const data = await res.json();
-      if (!res.ok) { errEl.textContent = data.error; return; }
+      let data;
+      try { data = await res.json(); }
+      catch { errEl.textContent = `Server returned an unexpected response (status ${res.status}). Check the API URL.`; return; }
+      if (!res.ok) { errEl.textContent = data.error || `Registration failed (status ${res.status}).`; return; }
       this.saveSession(data.token, data.user);
       this.boot();
-    } catch { errEl.textContent = 'Cannot connect to server.'; }
+    } catch (err) {
+      console.error('Register network error:', err);
+      errEl.textContent = 'Cannot connect to server.';
+    }
     finally { btn.style.opacity = '1'; }
   }
 
@@ -158,8 +185,13 @@ class ZapChat {
     // Call Action Buttons (Voice & Video)
     const voiceBtn = document.getElementById('voice-call-btn');
     const videoBtn = document.getElementById('video-call-btn');
-    if (voiceBtn) voiceBtn.addEventListener('click', () => this.initiateCall('voice'));
+    if (voiceBtn) voiceBtn.addEventListener('click', () => this.initiateCall('audio'));
     if (videoBtn) videoBtn.addEventListener('click', () => this.initiateCall('video'));
+
+    // Call modal controls
+    document.getElementById('call-toggle-mic')?.addEventListener('click', () => this.toggleMic());
+    document.getElementById('call-toggle-cam')?.addEventListener('click', () => this.toggleCam());
+    document.getElementById('call-end-btn')?.addEventListener('click', () => this.endCall());
 
     // Emoji
     document.querySelector('.emoji-btn').addEventListener('click', e => {
@@ -179,60 +211,197 @@ class ZapChat {
     this.fetchUsers();
   }
 
-  // ─── CALL HANDLING ───────────────────────────────────────────────────────
-  async initiateCall(type) {
+  // ─── CALL HANDLING (Metered JavaScript SDK) ───────────────────────────────
+  // Room creation still goes through the server's POST /api/create-room
+  // (secret key never touches the client). What changed is how we USE the
+  // room: instead of opening data.publicURL in a popup/iframe and hoping
+  // query params like ?skipPrejoin auto-join us, we now join in-page with
+  // Metered.Meeting(), which is a real, documented API — no popup-blocker
+  // risk, full control over the UI, and no manual "Join" click needed
+  // because join() itself performs the join.
+  async initiateCall(callType) {
     if (!this.activeChat) return;
-    
-    this.showToast('Calling...', `Starting ${type} call with ${this.activeChat}`, 'message');
+    if (!this.onlineSet.has(this.activeChat)) {
+      this.showToast('Cannot call', `${this.activeChat} is offline.`, 'error');
+      return;
+    }
+    if (this.meeting) {
+      this.showToast('Call in progress', 'End your current call first.', 'error');
+      return;
+    }
+
+    this.showToast('Calling…', `Starting ${callType} call with ${this.activeChat}`, 'message');
 
     try {
-      // Step 1: Query your separate backend Vercel server to build a space securely
-      const response = await fetch(`${BACKEND_SERVER}/api/calls/room`, {
+      const response = await fetch(`${API}/api/create-room`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.token}`
         },
-        body: JSON.stringify({
-          roomName: `zapchat-${this.user.username}-${this.activeChat}-${Date.now()}`
-        })
+        body: JSON.stringify({ with: this.activeChat, privacy: 'private' })
       });
 
       const data = await response.json();
-
-      if (!response.ok || !data.ok) {
+      if (!response.ok) {
         throw new Error(data.error || 'Server rejected call setup request.');
       }
 
-      // Step 2: Use the response token and properties to link the user to the WebRTC screen
-      console.log('Metered room created successfully:', data.room.roomName);
-      
-      // Send a signaling link through websockets to alert the receiver
-      this.socket.emit('call_incoming', {
+      this.activeCallRoom = { roomName: data.roomName, with: this.activeChat, callType };
+
+      // Notify the other user over the socket so their client can ring + join.
+      // roomURL here is the bare "domain/roomName" form (no https://) that
+      // both Metered's SDK and our server's /api/create-room response use.
+      this.socket.emit('call_invite', {
         to: this.activeChat,
-        roomName: data.room.roomName,
-        type: type
+        callType,
+        roomURL: data.roomURL,
+        roomName: data.roomName,
       });
 
-      this.joinCallRoom(data.room.roomName, type);
+      await this.joinCallRoom(data.roomURL, callType);
 
     } catch (err) {
       console.error('Failed to initiate call:', err);
       this.showToast('Call Error', err.message || 'Could not connect to voice/video services.', 'error');
+      this.activeCallRoom = null;
     }
   }
 
-  joinCallRoom(roomName, type) {
-    // If you are using the Metered Embedded iframe or library script:
-    // This dynamically configures an iframe area or overlay view.
-    const domain = 'zapchat.metered.live'; // Your Metered domain string handle
-    const callUrl = `https://${domain}/${roomName}?video=${type === 'video'}&audio=true`;
-    
-    // Simple popup/iframe system for standard deployment setups
-    const callWindow = window.open(callUrl, 'ZapChat Call', 'width=800,height=600');
-    if (!callWindow) {
-      this.showToast('Popup Blocked', 'Please allow popups to enter the call screen room.', 'error');
+  // Joins the Metered room in-page using the SDK. callType is 'audio' or
+  // 'video' — audio calls skip camera sharing and the local/remote video
+  // tags stay hidden, falling back to the <audio id="remoteAudio"> element
+  // exactly as in the Metered audio-call reference example.
+  async joinCallRoom(roomURL, callType) {
+    this.openCallModal(callType);
+
+    try {
+      this.meeting = new Metered.Meeting();
+
+      this.meeting.on('participantJoined', participantInfo => {
+        console.log('participant has joined the room', participantInfo);
+        this.domCache.callStatusText.textContent = 'Connected';
+      });
+
+      this.meeting.on('remoteTrackStarted', remoteTrackItem => {
+        console.log('remoteTrackStarted', remoteTrackItem);
+        const remoteStream = new MediaStream([remoteTrackItem.track]);
+        if (remoteTrackItem.type === 'video') {
+          this.domCache.remoteVideo.srcObject = remoteStream;
+          this.domCache.remoteVideo.play().catch(() => {});
+        } else {
+          this.domCache.remoteAudio.srcObject = remoteStream;
+          this.domCache.remoteAudio.play().catch(() => {});
+        }
+      });
+
+      this.meeting.on('localTrackStarted', item => {
+        if (item.type === 'video') {
+          const localStream = new MediaStream([item.track]);
+          this.domCache.localVideo.srcObject = localStream;
+        }
+      });
+
+      this.meeting.on('participantLeft', () => {
+        this.showToast('Call ended', `${this.activeCallRoom?.with || 'The other user'} left the call.`, 'message');
+        this.endCall();
+      });
+
+      const meetingInfo = await this.meeting.join({
+        roomURL,
+        name: this.user.username,
+      });
+      console.log('Meeting joined', meetingInfo);
+
+      // Always share audio.
+      try {
+        await this.meeting.startAudio();
+      } catch (ex) {
+        console.log('Error occurred when sharing microphone', ex);
+        this.showToast('Mic unavailable', 'Could not access your microphone.', 'error');
+      }
+
+      // Only share camera for video calls.
+      if (callType === 'video') {
+        try {
+          await this.meeting.startVideo();
+        } catch (ex) {
+          console.log('Error occurred when sharing camera', ex);
+          this.showToast('Camera unavailable', 'Could not access your camera.', 'error');
+        }
+      } else {
+        this.domCache.localVideo.classList.add('hidden');
+        this.domCache.remoteVideo.classList.add('hidden');
+      }
+
+      this.domCache.callStatusText.textContent = 'Ringing…';
+
+    } catch (err) {
+      console.error('Failed to join call room:', err);
+      this.showToast('Call Error', 'Could not join the call.', 'error');
+      this.endCall();
     }
+  }
+
+  openCallModal(callType) {
+    const modal = this.domCache.callModal;
+    modal.classList.remove('hidden');
+    this.domCache.callWithName.textContent = this.activeCallRoom?.with || this.activeChat || '';
+    this.domCache.callStatusText.textContent = 'Connecting…';
+    this.domCache.localVideo.classList.toggle('hidden', callType !== 'video');
+    this.domCache.remoteVideo.classList.toggle('hidden', callType !== 'video');
+    this.micOn = true;
+    this.camOn = true;
+  }
+
+  closeCallModal() {
+    const modal = this.domCache.callModal;
+    modal.classList.add('hidden');
+    this.domCache.localVideo.srcObject = null;
+    this.domCache.remoteVideo.srcObject = null;
+    this.domCache.remoteAudio.srcObject = null;
+  }
+
+  toggleMic() {
+    if (!this.meeting) return;
+    this.micOn = !this.micOn;
+    if (this.micOn) this.meeting.startAudio?.();
+    else this.meeting.stopAudio?.();
+    const btn = document.getElementById('call-toggle-mic');
+    btn?.querySelector('i')?.classList.toggle('fa-microphone-slash', !this.micOn);
+    btn?.querySelector('i')?.classList.toggle('fa-microphone', this.micOn);
+  }
+
+  toggleCam() {
+    if (!this.meeting || this.activeCallRoom?.callType !== 'video') return;
+    this.camOn = !this.camOn;
+    if (this.camOn) this.meeting.startVideo?.();
+    else this.meeting.stopVideo?.();
+    const btn = document.getElementById('call-toggle-cam');
+    btn?.querySelector('i')?.classList.toggle('fa-video-slash', !this.camOn);
+    btn?.querySelector('i')?.classList.toggle('fa-video', this.camOn);
+  }
+
+  endCall() {
+    if (this.activeCallRoom) {
+      this.socket.emit('call_end', { to: this.activeCallRoom.with });
+    }
+    this.cleanupCallLocal();
+  }
+
+  // Tears down the local meeting/modal state only — does NOT emit
+  // 'call_end'. Used when the other side already told us the call is over
+  // (call_rejected / call_failed / call_ended), so we don't echo the
+  // signal back to them.
+  cleanupCallLocal() {
+    try {
+      this.meeting?.leaveMeeting?.();
+    } catch (err) {
+      console.error('Error leaving meeting:', err);
+    }
+    this.meeting = null;
+    this.activeCallRoom = null;
+    this.closeCallModal();
   }
 
   // ─── SOCKET ──────────────────────────────────────────────────────────────
@@ -258,12 +427,40 @@ class ZapChat {
       console.log('🔴 Socket disconnected');
     });
 
-    // Incoming call signal receiver setup
-    this.socket.on('incoming_call_signal', ({ from, roomName, type }) => {
-      const accept = confirm(`Incoming ${type} call from ${from}. Accept?`);
+    // Server emits 'call_invite' to the recipient with
+    // { from, callType, roomURL, roomName }.
+    this.socket.on('call_invite', ({ from, callType, roomURL, roomName }) => {
+      const accept = confirm(`Incoming ${callType} call from ${from}. Accept?`);
       if (accept) {
-        this.joinCallRoom(roomName, type);
+        this.activeCallRoom = { roomName, with: from, callType };
+        this.socket.emit('call_accept', { to: from, roomURL, roomName });
+        this.joinCallRoom(roomURL, callType);
+      } else {
+        this.socket.emit('call_reject', { to: from });
       }
+    });
+
+    this.socket.on('call_accepted', ({ from, roomURL }) => {
+      this.showToast('Call accepted', `${from} joined the call.`, 'message');
+      // Caller is already joined to the room from initiateCall(); nothing
+      // further to do here besides surfacing the toast. roomURL is
+      // available if needed for reconnection logic later.
+      void roomURL;
+    });
+
+    this.socket.on('call_rejected', ({ from }) => {
+      this.showToast('Call declined', `${from} declined the call.`, 'error');
+      this.cleanupCallLocal();
+    });
+
+    this.socket.on('call_failed', ({ reason }) => {
+      this.showToast('Call failed', reason || 'Could not reach that user.', 'error');
+      this.cleanupCallLocal();
+    });
+
+    this.socket.on('call_ended', ({ from }) => {
+      this.showToast('Call ended', `${from} ended the call.`, 'message');
+      this.cleanupCallLocal();
     });
 
     this.socket.on('online_users', users => {
@@ -329,17 +526,17 @@ class ZapChat {
     const list = this.domCache.usersList;
     const fragment = document.createDocumentFragment();
     list.innerHTML = '';
-    
+
     if (!users.length) {
       list.innerHTML = '<div class="empty-state"><i class="fas fa-user-slash"></i><p>No other users yet.</p></div>';
       return;
     }
-    
+
     users.forEach(u => {
       if (this.onlineSet.has(u.username)) u.online = true;
       fragment.appendChild(this.createContactEl(u, false));
     });
-    
+
     list.appendChild(fragment);
   }
 
@@ -396,7 +593,7 @@ class ZapChat {
   // ─── OPEN / CLOSE CHAT ───────────────────────────────────────────────────
   async openChat(username) {
     if (this.activeChat === username) return;
-    
+
     this.activeChat = username;
     this.ensureChat(username);
 
@@ -426,7 +623,7 @@ class ZapChat {
       });
       const history = await res.json();
       this.chats.get(username).messages = history;
-      
+
       const fragment = document.createDocumentFragment();
       history.forEach(m => this.renderMessage(m, fragment));
       msgArea.appendChild(fragment);
@@ -547,9 +744,12 @@ class ZapChat {
   }
 
   stopTyping() {
+    // FIXED: this previously re-emitted 'typing_start' right before
+    // 'typing_stop', which would re-trigger the typing indicator on the
+    // recipient's screen for a moment every time you stopped typing or hit
+    // send. It should only ever emit 'typing_stop'.
     if (this.isTyping && this.activeChat) {
       this.isTyping = false;
-      this.socket.emit('typing_start', { to: this.activeChat });
       this.socket.emit('typing_stop', { to: this.activeChat });
     }
     clearTimeout(this.typingTimer);
@@ -575,23 +775,23 @@ class ZapChat {
     const isOnline = this.onlineSet.has(username);
 
     const containers = [this.domCache.chatsSection, document.getElementById('contacts-section')];
-    
+
     containers.forEach(container => {
       if (!container) return;
       const item = container.querySelector(`.contact-item[data-username="${username}"]`);
       if (item) {
         const avatar = item.querySelector('.c-avatar');
         if (avatar) avatar.className = `c-avatar ${isOnline ? 'online' : ''}`;
-        
+
         const lastEl = item.querySelector('.c-last');
         if (lastEl) {
           lastEl.className = `c-last ${chat?.typing ? 'typing' : ''}`;
           lastEl.textContent = chat?.typing ? '✍️ typing…' : (chat?.lastMsg || 'Start a conversation');
         }
-        
+
         const timeEl = item.querySelector('.c-time');
         if (timeEl) timeEl.textContent = chat?.lastTime ? this.formatTime(chat.lastTime) : '';
-        
+
         const badge = item.querySelector('.c-badge');
         if (badge) badge.remove();
         if (chat?.unread) {
@@ -612,7 +812,7 @@ class ZapChat {
     if (emptyState) emptyState.remove();
 
     const existingEntry = section.querySelector(`.contact-item[data-username="${username}"]`);
-    
+
     if (existingEntry) {
       if (section.firstChild === existingEntry) return;
       existingEntry.remove();
@@ -626,7 +826,7 @@ class ZapChat {
   buildEmojiPicker() {
     const picker = this.domCache.emojiPicker;
     const fragment = document.createDocumentFragment();
-    
+
     EMOJIS.forEach(em => {
       const btn = document.createElement('span');
       btn.className = 'emoji-btn-item';
@@ -647,11 +847,11 @@ class ZapChat {
   showToast(title, body, type = 'message') {
     const container = document.querySelector('.toast-container');
     if (!container) return;
-    
+
     const toast = document.createElement('div');
     toast.className = 'toast';
     if (type === 'error') toast.style.borderLeftColor = 'var(--danger)';
-    
+
     toast.innerHTML = `<div class="toast-title">${this.escHtml(title)}</div><div class="toast-body">${this.escHtml(body.substring(0, 60))}</div>`;
     container.appendChild(toast);
     setTimeout(() => toast.remove(), 4200);
