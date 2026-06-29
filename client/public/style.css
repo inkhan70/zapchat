@@ -27,6 +27,120 @@
   --radius-md:      14px;
   --radius-lg:      22px;
   --radius-xl:      32px;
+   /* ─── Call Modal (Metered SDK embedded call UI) ─────────────────────────────
+   Append this block to the END of your existing style.css.
+   Reuses your existing --bg-card / --text-primary / --accent / --danger
+   variables and your existing .icon-btn pattern, so it matches the rest of
+   the app instead of introducing a separate palette. */
+
+.call-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 9999; /* same layer as .auth-screen; fine since a call only happens once already logged in */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.call-modal.hidden {
+  display: none !important; /* matches the !important convention your .hidden class already uses */
+}
+
+.call-modal-inner {
+  width: min(480px, 92vw);
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-card);
+  animation: cardIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); /* reuses your existing @keyframes cardIn */
+}
+
+.call-modal-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 20px 16px 12px;
+  color: var(--text-primary);
+  font-weight: 700;
+  font-size: 16px;
+  text-align: center;
+}
+
+.call-status-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.call-video-area {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #000; /* video letterboxing always needs true black, not a theme color */
+}
+
+.remote-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+
+.remote-video.hidden,
+.local-video.hidden {
+  display: none;
+}
+
+.local-video {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 110px;
+  height: 82px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 2px solid var(--border-light);
+  background: #000;
+}
+
+.call-controls {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  padding: 18px;
+  background: var(--bg-sidebar);
+  border-top: 1px solid var(--border);
+}
+
+/* Bigger, circular variant of your existing .icon-btn for call controls.
+   Inherits color/transition from .icon-btn — only size/shape/background differ. */
+.call-controls .icon-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--bg-input);
+  font-size: 17px;
+}
+
+.call-controls .icon-btn:hover {
+  background: var(--bg-hover);
+}
+
+.call-controls .end-call-btn {
+  background: var(--danger);
+  color: var(--text-primary);
+}
+
+.call-controls .end-call-btn:hover {
+  background: #dc2626; /* slightly darker than --danger on hover; add a --danger-dark var if you want this themeable */
+  color: var(--text-primary);
+}
+
 
   --shadow-glow:    0 0 30px rgba(37,211,102,0.15);
   --shadow-card:    0 8px 32px rgba(0,0,0,0.4);
