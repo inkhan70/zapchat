@@ -2,12 +2,15 @@
    ZapChat – Client App
    ═══════════════════════════════════════════ */
 
-// CRITICAL PRODUCTION FIX: Always use relative paths.
-// app.js is served by the same Express server that hosts the API, so
-// relative paths (`/api/...`) automatically resolve to whatever domain
-// the page is currently loaded from — Back4app, Vercel, or localhost —
-// with zero hardcoding and zero risk of pointing at the wrong host.
-const API = '';
+// FIXED: this app is no longer served by the same Express server that
+// hosts the API (that was true under the old Back4app/Vercel single-origin
+// setup). The frontend now lives on Cloudflare Pages and the backend on
+// Railway — two separate origins. A relative API = '' resolves
+// `${API}/api/register` to whatever domain the PAGE is loaded from, which
+// is zapchat-5ru.pages.dev — a static host with no /api routes at all,
+// producing the exact 405 "Method Not Allowed" seen in testing. This must
+// point at the real backend origin.
+const API = 'https://zapchat-production.up.railway.app';
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
@@ -24,6 +27,9 @@ class ZapChat {
 
     // Call state
     this.meeting        = null;  // active Metered.Meeting instance
+    this.isJoined        = false; // true only once meeting.join() has actually resolved —
+                                   // calling startAudio/startVideo/stopAudio/stopVideo before
+                                   // that throws "meeting not joined or in the joining state"
     this.pendingCall     = null; // { with, callType, roomURL, roomName } while ringing out
     this.incomingCall    = null; // { from, callType, roomURL, roomName } while ringing in
     this.currentCallWith = null; // username of the person on the other end of an active call
@@ -485,9 +491,12 @@ class ZapChat {
   }
 
   stopTyping() {
+    // FIXED: this was re-emitting 'typing_start' immediately before
+    // 'typing_stop', which re-triggers the typing indicator on the
+    // recipient's screen for a moment every time typing stops or a
+    // message is sent. Should only ever emit 'typing_stop' here.
     if (this.isTyping && this.activeChat) {
       this.isTyping = false;
-      this.socket.emit('typing_start', { to: this.activeChat });
       this.socket.emit('typing_stop', { to: this.activeChat });
     }
     clearTimeout(this.typingTimer);
@@ -644,10 +653,12 @@ class ZapChat {
   async joinCall(callType, withUser, roomURL) {
     this.openCallModal(callType, withUser, 'Connecting…');
     this.currentCallWith = withUser;
+    this.isJoined = false; // guards toggleMute/toggleCamera against firing before join() resolves
 
     try {
       this.meeting = new Metered.Meeting();
       await this.meeting.join({ roomURL, name: this.user.username });
+      this.isJoined = true;
 
       await this.meeting.startAudio();
       if (callType === 'video') await this.meeting.startVideo();
@@ -702,7 +713,7 @@ class ZapChat {
     } catch (err) {
       console.error('joinCall error:', err);
       this.showToast('Call Failed', 'Could not connect to call.', 'error');
-      this.closeCallModal();
+      this.endCallUI(); // cleans up meeting/isJoined state too, not just the modal
     }
   }
 
@@ -718,6 +729,7 @@ class ZapChat {
       try { this.meeting.leaveMeeting(); } catch (_) {}
       this.meeting = null;
     }
+    this.isJoined = false;
     this.closeCallModal();
     this.pendingCall = null;
     this.currentCallWith = null;
@@ -747,7 +759,7 @@ class ZapChat {
   }
 
   async toggleMute() {
-    if (!this.meeting) return;
+    if (!this.meeting || !this.isJoined) return;
     this.isMuted = !this.isMuted;
     if (this.isMuted) await this.meeting.stopAudio();
     else await this.meeting.startAudio();
@@ -755,7 +767,7 @@ class ZapChat {
   }
 
   async toggleCamera() {
-    if (!this.meeting) return;
+    if (!this.meeting || !this.isJoined) return;
     this.isCamOff = !this.isCamOff;
     if (this.isCamOff) await this.meeting.stopVideo();
     else await this.meeting.startVideo();
