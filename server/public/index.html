@@ -9,15 +9,10 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
   <link rel="stylesheet" href="style.css" />
 
-  <!-- Metered Video SDK — exposes the global `Metered` namespace.
-       See https://www.metered.ca/docs/llms-video-sdk.txt
-       Note: the SDK global is `Metered` (not `MeteredVideo`). We instantiate
-       via `new Metered.Meeting()` — see app.js. -->
   <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
 </head>
 <body>
 
-<!-- ═══════════════════ AUTH SCREEN ═══════════════════ -->
 <div id="auth-screen" class="auth-screen">
   <div class="auth-bg">
     <div class="auth-blob b1"></div>
@@ -69,10 +64,8 @@
   </div>
 </div>
 
-<!-- ═══════════════════ MAIN APP ═══════════════════ -->
 <div id="app" class="app hidden">
 
-  <!-- SIDEBAR -->
   <aside class="sidebar">
     <div class="sidebar-header">
       <div class="me-avatar" id="me-avatar"></div>
@@ -112,10 +105,8 @@
     </div>
   </aside>
 
-  <!-- CHAT PANEL -->
   <main class="chat-panel">
 
-    <!-- EMPTY STATE -->
     <div id="chat-empty" class="chat-empty">
       <div class="chat-empty-icon"><i class="fas fa-bolt"></i></div>
       <h2>Welcome to ZapChat</h2>
@@ -125,7 +116,6 @@
       </div>
     </div>
 
-    <!-- ACTIVE CHAT -->
     <div id="active-chat" class="active-chat hidden">
       <div class="chat-topbar">
         <button class="back-btn icon-btn" id="back-btn"><i class="fas fa-arrow-left"></i></button>
@@ -161,67 +151,39 @@
       </div>
     </div>
 
-  </main>
-</div>
+    <div id="call-modal" class="call-modal hidden" aria-hidden="true">
+      <div class="call-modal-inner">
+        <div class="call-modal-header">
+          <span id="call-title-text">Calling…</span>
+          <span class="call-status-line">
+            <span id="call-status-dot" class="call-status-dot"></span>
+            <span id="call-status-text">Connecting…</span>
+          </span>
+        </div>
 
-<!-- ═══════════════════ VIDEO / VOICE CALL MODAL ═══════════════════ -->
-<div id="call-modal" class="call-modal hidden" aria-hidden="true">
-  <div class="call-modal-backdrop"></div>
+        <div class="call-video-area">
+          <div id="call-remote-grid" class="call-remote-grid">
+            <div class="call-empty" id="call-empty">
+              <i class="fas fa-user-group"></i>
+              <p>Waiting for the other side to join…</p>
+            </div>
+          </div>
 
-  <div class="call-modal-inner">
-    <!-- Header: room name + status pill -->
-    <div class="call-header">
-      <div class="call-title">
-        <i class="fas fa-bolt"></i>
-        <span id="call-title-text">Video Call</span>
-      </div>
-      <div class="call-status">
-        <span class="call-status-dot" id="call-status-dot"></span>
-        <span id="call-status-text">Connecting…</span>
-      </div>
-    </div>
+          <div class="call-local-wrap">
+            <video id="call-local-video" autoplay playsinline muted class="call-local-video"></video>
+            <i id="call-local-mic-off" class="fas fa-microphone-slash call-local-mic-off hidden"></i>
+          </div>
+        </div>
 
-    <!-- Stage: remote video grid + local PIP -->
-    <div class="call-stage">
-      <div class="call-remote-grid" id="call-remote-grid">
-        <div class="call-empty" id="call-empty">
-          <i class="fas fa-user-group"></i>
-          <p>Waiting for the other side to join…</p>
+        <div class="call-controls">
+          <button class="icon-btn" id="call-mute-btn" title="Mute/Unmute"><i class="fas fa-microphone"></i></button>
+          <button class="icon-btn" id="call-cam-btn" title="Camera on/off"><i class="fas fa-video"></i></button>
+          <button class="icon-btn end-call-btn" id="call-hangup-btn" title="End Call"><i class="fas fa-phone-slash"></i></button>
         </div>
       </div>
-      <div class="call-local-pip" id="call-local-pip">
-        <video id="call-local-video" autoplay muted playsinline></video>
-        <span class="call-local-label">You</span>
-        <span class="call-local-mic-off hidden" id="call-local-mic-off"><i class="fas fa-microphone-slash"></i></span>
-      </div>
     </div>
 
-    <!-- Sidebar: live participants roster -->
-    <aside class="call-roster" id="call-roster">
-      <div class="call-roster-title">
-        <i class="fas fa-users"></i>
-        <span>Participants</span>
-        <span class="call-roster-count" id="call-roster-count">1</span>
-      </div>
-      <ul class="call-roster-list" id="call-roster-list"></ul>
-    </aside>
-
-    <!-- Controls -->
-    <div class="call-controls">
-      <button class="call-ctrl" id="call-mute-btn" title="Mute / Unmute mic">
-        <i class="fas fa-microphone"></i>
-      </button>
-      <button class="call-ctrl" id="call-cam-btn" title="Pause / Resume camera">
-        <i class="fas fa-video"></i>
-      </button>
-      <button class="call-ctrl" id="call-screen-btn" title="Share screen">
-        <i class="fas fa-desktop"></i>
-      </button>
-      <button class="call-ctrl call-ctrl-danger" id="call-hangup-btn" title="End call">
-        <i class="fas fa-phone-slash"></i>
-      </button>
-    </div>
-  </div>
+  </main>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
