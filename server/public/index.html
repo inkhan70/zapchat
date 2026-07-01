@@ -8,16 +8,10 @@
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
   <link rel="stylesheet" href="style.css" />
-
-  <!-- Metered Video SDK — exposes the global `Metered` namespace.
-       See https://www.metered.ca/docs/llms-video-sdk.txt
-       Note: the SDK global is `Metered` (not `MeteredVideo`). We instantiate
-       via `new Metered.Meeting()` — see app.js. -->
   <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
 </head>
 <body>
 
-<!-- ═══════════════════ AUTH SCREEN ═══════════════════ -->
 <div id="auth-screen" class="auth-screen">
   <div class="auth-bg">
     <div class="auth-blob b1"></div>
@@ -40,39 +34,73 @@
     <div id="login-panel" class="auth-panel active">
       <div class="input-group">
         <i class="fas fa-user"></i>
-        <input type="text" id="login-username" placeholder="Username" autocomplete="username" />
+        <input type="text" id="login-identifier" placeholder="Username or email" autocomplete="username" />
       </div>
       <div class="input-group">
         <i class="fas fa-lock"></i>
         <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
       </div>
       <div id="login-error" class="auth-error"></div>
-      <button id="login-btn" class="auth-btn">
+      <button id="login-btn" class="auth-btn" type="button">
         <span>Sign In</span><i class="fas fa-arrow-right"></i>
       </button>
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-top:4px;">
+        <button id="show-forgot-btn" type="button" style="background:none;border:none;color:#25d366;font-weight:600;font-size:12px;padding:0;">Forgot password?</button>
+        <button id="google-login-btn" class="auth-btn" type="button" style="margin-top:0;padding:10px 14px;font-size:13px;">Continue with Google</button>
+      </div>
     </div>
 
     <div id="register-panel" class="auth-panel">
       <div class="input-group">
         <i class="fas fa-user"></i>
-        <input type="text" id="reg-username" placeholder="Choose username" autocomplete="username" />
+        <input type="text" id="signup-username" placeholder="Choose username" autocomplete="username" />
+      </div>
+      <div class="input-group">
+        <i class="fas fa-envelope"></i>
+        <input type="email" id="signup-email" placeholder="Email address" autocomplete="email" />
       </div>
       <div class="input-group">
         <i class="fas fa-lock"></i>
-        <input type="password" id="reg-password" placeholder="Create password" autocomplete="new-password" />
+        <input type="password" id="signup-password" placeholder="Create password" autocomplete="new-password" />
       </div>
-      <div id="register-error" class="auth-error"></div>
-      <button id="register-btn" class="auth-btn">
+      <div id="signup-error" class="auth-error"></div>
+      <button id="signup-btn" class="auth-btn" type="button">
         <span>Create Account</span><i class="fas fa-arrow-right"></i>
       </button>
+      <button id="google-signup-btn" class="auth-btn" type="button" style="margin-top:0;padding:10px 14px;font-size:13px;">Sign up with Google</button>
+    </div>
+
+    <div id="forgot-panel" class="auth-panel">
+      <div class="input-group">
+        <i class="fas fa-envelope"></i>
+        <input type="email" id="forgot-email" placeholder="Email address" autocomplete="email" />
+      </div>
+      <div id="forgot-error" class="auth-error"></div>
+      <button id="forgot-btn" class="auth-btn" type="button">
+        <span>Send reset email</span><i class="fas fa-paper-plane"></i>
+      </button>
+      <button id="back-to-login-from-forgot" type="button" style="background:none;border:none;color:#25d366;font-weight:600;font-size:12px;align-self:flex-start;padding:0;">Back to sign in</button>
+    </div>
+
+    <div id="reset-panel" class="auth-panel">
+      <div class="input-group">
+        <i class="fas fa-lock"></i>
+        <input type="password" id="reset-password" placeholder="New password" autocomplete="new-password" />
+      </div>
+      <div class="input-group">
+        <i class="fas fa-lock"></i>
+        <input type="password" id="reset-confirm" placeholder="Confirm new password" autocomplete="new-password" />
+      </div>
+      <div id="reset-error" class="auth-error"></div>
+      <button id="reset-btn" class="auth-btn" type="button">
+        <span>Reset password</span><i class="fas fa-shield-halved"></i>
+      </button>
+      <button id="back-to-login-from-reset" type="button" style="background:none;border:none;color:#25d366;font-weight:600;font-size:12px;align-self:flex-start;padding:0;">Back to sign in</button>
     </div>
   </div>
 </div>
 
-<!-- ═══════════════════ MAIN APP ═══════════════════ -->
 <div id="app" class="app hidden">
-
-  <!-- SIDEBAR -->
   <aside class="sidebar">
     <div class="sidebar-header">
       <div class="me-avatar" id="me-avatar"></div>
@@ -92,12 +120,8 @@
     </div>
 
     <div class="sidebar-tabs">
-      <button class="s-tab active" data-section="chats">
-        <i class="fas fa-message"></i>Chats
-      </button>
-      <button class="s-tab" data-section="contacts">
-        <i class="fas fa-users"></i>Contacts
-      </button>
+      <button class="s-tab active" data-section="chats"><i class="fas fa-message"></i>Chats</button>
+      <button class="s-tab" data-section="contacts"><i class="fas fa-users"></i>Contacts</button>
     </div>
 
     <div id="chats-section" class="contact-list">
@@ -112,10 +136,7 @@
     </div>
   </aside>
 
-  <!-- CHAT PANEL -->
   <main class="chat-panel">
-
-    <!-- EMPTY STATE -->
     <div id="chat-empty" class="chat-empty">
       <div class="chat-empty-icon"><i class="fas fa-bolt"></i></div>
       <h2>Welcome to ZapChat</h2>
@@ -125,7 +146,6 @@
       </div>
     </div>
 
-    <!-- ACTIVE CHAT -->
     <div id="active-chat" class="active-chat hidden">
       <div class="chat-topbar">
         <button class="back-btn icon-btn" id="back-btn"><i class="fas fa-arrow-left"></i></button>
@@ -135,12 +155,8 @@
           <div class="chat-topbar-sub" id="chat-status">🔒 Encrypted</div>
         </div>
         <div class="chat-topbar-actions">
-          <button class="icon-btn" id="voice-call-btn" title="Voice Call">
-            <i class="fas fa-phone"></i>
-          </button>
-          <button class="icon-btn" id="video-call-btn" title="Video Call">
-            <i class="fas fa-video"></i>
-          </button>
+          <button class="icon-btn" id="voice-call-btn" title="Voice Call"><i class="fas fa-phone"></i></button>
+          <button class="icon-btn" id="video-call-btn" title="Video Call"><i class="fas fa-video"></i></button>
           <button class="icon-btn" title="More"><i class="fas fa-ellipsis-vertical"></i></button>
         </div>
       </div>
@@ -155,21 +171,15 @@
         <div class="composer-input-wrap">
           <textarea id="message-input" placeholder="Type a message…" rows="1"></textarea>
         </div>
-        <button class="send-btn" id="send-btn">
-          <i class="fas fa-paper-plane"></i>
-        </button>
+        <button class="send-btn" id="send-btn"><i class="fas fa-paper-plane"></i></button>
       </div>
     </div>
-
   </main>
 </div>
 
-<!-- ═══════════════════ VIDEO / VOICE CALL MODAL ═══════════════════ -->
 <div id="call-modal" class="call-modal hidden" aria-hidden="true">
   <div class="call-modal-backdrop"></div>
-
   <div class="call-modal-inner">
-    <!-- Header: room name + status pill -->
     <div class="call-header">
       <div class="call-title">
         <i class="fas fa-bolt"></i>
@@ -181,7 +191,6 @@
       </div>
     </div>
 
-    <!-- Stage: remote video grid + local PIP -->
     <div class="call-stage">
       <div class="call-remote-grid" id="call-remote-grid">
         <div class="call-empty" id="call-empty">
@@ -196,7 +205,6 @@
       </div>
     </div>
 
-    <!-- Sidebar: live participants roster -->
     <aside class="call-roster" id="call-roster">
       <div class="call-roster-title">
         <i class="fas fa-users"></i>
@@ -206,20 +214,11 @@
       <ul class="call-roster-list" id="call-roster-list"></ul>
     </aside>
 
-    <!-- Controls -->
     <div class="call-controls">
-      <button class="call-ctrl" id="call-mute-btn" title="Mute / Unmute mic">
-        <i class="fas fa-microphone"></i>
-      </button>
-      <button class="call-ctrl" id="call-cam-btn" title="Pause / Resume camera">
-        <i class="fas fa-video"></i>
-      </button>
-      <button class="call-ctrl" id="call-screen-btn" title="Share screen">
-        <i class="fas fa-desktop"></i>
-      </button>
-      <button class="call-ctrl call-ctrl-danger" id="call-hangup-btn" title="End call">
-        <i class="fas fa-phone-slash"></i>
-      </button>
+      <button class="call-ctrl" id="call-mute-btn" title="Mute / Unmute mic"><i class="fas fa-microphone"></i></button>
+      <button class="call-ctrl" id="call-cam-btn" title="Pause / Resume camera"><i class="fas fa-video"></i></button>
+      <button class="call-ctrl" id="call-screen-btn" title="Share screen"><i class="fas fa-desktop"></i></button>
+      <button class="call-ctrl call-ctrl-danger" id="call-hangup-btn" title="End call"><i class="fas fa-phone-slash"></i></button>
     </div>
   </div>
 </div>
