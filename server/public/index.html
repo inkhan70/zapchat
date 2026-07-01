@@ -31,40 +31,133 @@
       <p>Instant. Encrypted. Yours.</p>
     </div>
 
-    <div class="auth-tabs">
+    <div class="auth-tabs" id="auth-tabs">
       <button class="auth-tab active" data-tab="login">Sign In</button>
       <button class="auth-tab" data-tab="register">Create Account</button>
       <div class="auth-tab-slider"></div>
     </div>
 
+    <!-- ── SIGN IN ─────────────────────────────────────────────────── -->
     <div id="login-panel" class="auth-panel active">
       <div class="input-group">
         <i class="fas fa-user"></i>
-        <input type="text" id="login-username" placeholder="Username" autocomplete="username" />
+        <input type="text" id="login-identifier" placeholder="Email or username" autocomplete="username" />
       </div>
       <div class="input-group">
         <i class="fas fa-lock"></i>
         <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
       </div>
+      <div class="auth-row">
+        <button type="button" class="link-btn" id="forgot-link">Forgot password?</button>
+      </div>
       <div id="login-error" class="auth-error"></div>
       <button id="login-btn" class="auth-btn">
         <span>Sign In</span><i class="fas fa-arrow-right"></i>
       </button>
+      <div class="auth-switch">
+        New here? <button type="button" class="link-btn" data-tab="register">Create an account</button>
+      </div>
     </div>
 
+    <!-- ── REGISTER ────────────────────────────────────────────────── -->
     <div id="register-panel" class="auth-panel">
+      <!-- Profile picture picker (avatar preview) -->
+      <div class="profile-pic-picker" id="profile-pic-picker">
+        <div class="profile-pic-preview" id="profile-pic-preview">
+          <i class="fas fa-camera"></i>
+        </div>
+        <div class="profile-pic-info">
+          <div class="profile-pic-title">Add a profile picture</div>
+          <div class="profile-pic-sub">Optional · PNG, JPG, GIF, or WEBP · max 5 MB</div>
+        </div>
+        <button type="button" class="profile-pic-remove hidden" id="profile-pic-remove" title="Remove">
+          <i class="fas fa-xmark"></i>
+        </button>
+        <input type="file" id="profile-pic-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+      </div>
+
+      <div class="input-group">
+        <i class="fas fa-envelope"></i>
+        <input type="email" id="reg-email" placeholder="Email address" autocomplete="email" />
+      </div>
       <div class="input-group">
         <i class="fas fa-user"></i>
         <input type="text" id="reg-username" placeholder="Choose username" autocomplete="username" />
       </div>
       <div class="input-group">
         <i class="fas fa-lock"></i>
-        <input type="password" id="reg-password" placeholder="Create password" autocomplete="new-password" />
+        <input type="password" id="reg-password" placeholder="Create password (min 6 chars)" autocomplete="new-password" />
+      </div>
+      <div class="input-group">
+        <i class="fas fa-shield-halved"></i>
+        <input type="password" id="reg-password-confirm" placeholder="Confirm password" autocomplete="new-password" />
+      </div>
+      <div class="password-meter" id="password-meter">
+        <div class="password-meter-bar"><div class="password-meter-fill" id="password-meter-fill"></div></div>
+        <div class="password-meter-label" id="password-meter-label">Strength: —</div>
       </div>
       <div id="register-error" class="auth-error"></div>
       <button id="register-btn" class="auth-btn">
         <span>Create Account</span><i class="fas fa-arrow-right"></i>
       </button>
+      <div class="auth-switch">
+        Already have an account? <button type="button" class="link-btn" data-tab="login">Sign in</button>
+      </div>
+    </div>
+
+    <!-- ── FORGOT PASSWORD ─────────────────────────────────────────── -->
+    <div id="forgot-panel" class="auth-panel">
+      <div class="auth-panel-title">
+        <i class="fas fa-key"></i>
+        <span>Reset your password</span>
+      </div>
+      <p class="auth-panel-help">
+        Enter the email associated with your account and we'll send you a secure link to reset your password.
+      </p>
+      <div class="input-group">
+        <i class="fas fa-envelope"></i>
+        <input type="email" id="forgot-email" placeholder="Email address" autocomplete="email" />
+      </div>
+      <div id="forgot-error" class="auth-error"></div>
+      <div id="forgot-success" class="auth-success hidden"></div>
+      <button id="forgot-btn" class="auth-btn">
+        <span>Send Reset Link</span><i class="fas fa-paper-plane"></i>
+      </button>
+      <div class="auth-switch">
+        Remembered it? <button type="button" class="link-btn" data-tab="login">Back to sign in</button>
+      </div>
+    </div>
+
+    <!-- ── RESET PASSWORD ──────────────────────────────────────────── -->
+    <div id="reset-panel" class="auth-panel">
+      <div class="auth-panel-title">
+        <i class="fas fa-lock-open"></i>
+        <span>Choose a new password</span>
+      </div>
+      <p class="auth-panel-help">
+        Set a strong password for <strong id="reset-email-display">your account</strong>. You'll be signed in automatically once it's saved.
+      </p>
+      <input type="hidden" id="reset-token" />
+      <input type="hidden" id="reset-email" />
+      <div class="input-group">
+        <i class="fas fa-lock"></i>
+        <input type="password" id="reset-password" placeholder="New password (min 6 chars)" autocomplete="new-password" />
+      </div>
+      <div class="input-group">
+        <i class="fas fa-shield-halved"></i>
+        <input type="password" id="reset-password-confirm" placeholder="Confirm new password" autocomplete="new-password" />
+      </div>
+      <div class="password-meter" id="reset-password-meter">
+        <div class="password-meter-bar"><div class="password-meter-fill" id="reset-password-meter-fill"></div></div>
+        <div class="password-meter-label" id="reset-password-meter-label">Strength: —</div>
+      </div>
+      <div id="reset-error" class="auth-error"></div>
+      <button id="reset-btn" class="auth-btn">
+        <span>Save New Password</span><i class="fas fa-check"></i>
+      </button>
+      <div class="auth-switch">
+        Don't need to reset? <button type="button" class="link-btn" data-tab="login">Back to sign in</button>
+      </div>
     </div>
   </div>
 </div>
@@ -81,7 +174,7 @@
         <div class="me-status">🟢 Online</div>
       </div>
       <div class="sidebar-actions">
-        <button class="icon-btn" title="New Chat"><i class="fas fa-pen-to-square"></i></button>
+        <button class="icon-btn" id="profile-btn" title="My profile"><i class="fas fa-user-gear"></i></button>
         <button class="icon-btn" id="logout-btn" title="Logout"><i class="fas fa-right-from-bracket"></i></button>
       </div>
     </div>
@@ -162,6 +255,63 @@
     </div>
 
   </main>
+</div>
+
+<!-- ═══════════════════ PROFILE EDITOR MODAL ═══════════════════ -->
+<div id="profile-modal" class="profile-modal hidden" aria-hidden="true">
+  <div class="profile-modal-backdrop"></div>
+  <div class="profile-modal-inner">
+    <div class="profile-modal-header">
+      <div class="profile-modal-title">
+        <i class="fas fa-user-gear"></i>
+        <span>Your Profile</span>
+      </div>
+      <button class="icon-btn" id="profile-modal-close" title="Close">
+        <i class="fas fa-xmark"></i>
+      </button>
+    </div>
+    <div class="profile-modal-body">
+      <div class="profile-pic-edit">
+        <div class="profile-pic-preview large" id="profile-pic-edit-preview">
+          <i class="fas fa-user"></i>
+        </div>
+        <div class="profile-pic-edit-actions">
+          <button type="button" class="btn-secondary" id="profile-pic-upload-btn">
+            <i class="fas fa-camera"></i> Change photo
+          </button>
+          <button type="button" class="btn-secondary danger hidden" id="profile-pic-remove-btn">
+            <i class="fas fa-trash"></i> Remove
+          </button>
+          <input type="file" id="profile-pic-edit-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+          <div class="profile-pic-edit-help">PNG, JPG, GIF, or WEBP · max 5 MB</div>
+        </div>
+      </div>
+
+      <div class="input-group">
+        <i class="fas fa-envelope"></i>
+        <input type="email" id="profile-email" placeholder="Email" readonly />
+      </div>
+
+      <div class="input-group">
+        <i class="fas fa-user"></i>
+        <input type="text" id="profile-username" placeholder="Username" />
+      </div>
+
+      <div class="input-group">
+        <i class="fas fa-comment-dots"></i>
+        <input type="text" id="profile-status" placeholder="Status (max 140 chars)" maxlength="140" />
+      </div>
+
+      <div id="profile-error" class="auth-error"></div>
+      <div id="profile-success" class="auth-success hidden"></div>
+    </div>
+    <div class="profile-modal-footer">
+      <button type="button" class="btn-secondary" id="profile-cancel-btn">Cancel</button>
+      <button type="button" class="auth-btn inline" id="profile-save-btn">
+        <span>Save Changes</span><i class="fas fa-check"></i>
+      </button>
+    </div>
+  </div>
 </div>
 
 <!-- ═══════════════════ VIDEO / VOICE CALL MODAL ═══════════════════ -->

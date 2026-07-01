@@ -11,6 +11,28 @@ const API = '';
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
+// ─── Validators ───────────────────────────────────────────────────────────
+const EMAIL_RE    = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+const USERNAME_RE = /^[a-zA-Z0-9_.-]{3,32}$/;
+const MAX_PIC_BYTES = 5 * 1024 * 1024;          // 5 MB
+const MAX_PIC_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+// Estimate password strength on a 0–4 scale. Heuristic — good enough to
+// nudge users toward longer, more varied passwords without being annoying.
+function passwordStrength(pw) {
+  if (!pw) return { score: 0, label: '—' };
+  let score = 0;
+  if (pw.length >= 6)  score++;
+  if (pw.length >= 10) score++;
+  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
+  if (/\d/.test(pw))   score++;
+  if (/[^A-Za-z0-9]/.test(pw)) score++;
+  // Cap at 4 — the meter has 4 buckets.
+  score = Math.min(score, 4);
+  const labels = ['Very weak', 'Weak', 'Fair', 'Good', 'Strong'];
+  return { score, label: labels[score] };
+}
+
 class ZapChat {
   constructor() {
     this.socket     = null;
@@ -21,6 +43,10 @@ class ZapChat {
     this.onlineSet  = new Set();
     this.typingTimer = null;
     this.isTyping   = false;
+
+    // Profile picture selection during registration — kept in memory until
+    // the registration POST goes out, so the user can preview it first.
+    this.pendingProfilePic = null; // { dataUrl, file }
 
     // Call state
     this.meeting        = null;  // active Metered.Meeting instance
@@ -38,73 +64,463 @@ class ZapChat {
       emojiPicker: document.getElementById('emoji-picker'),
       usersList: document.getElementById('users-list'),
       chatsSection: document.getElementById('chats-section'),
+      contactsSection: document.getElementById('contacts-section'),
+      meAvatar: document.getElementById('me-avatar'),
+      meName: document.getElementById('me-name'),
     };
 
     this.bindAuthUI();
+    this.bindProfileUI();
+
+    // Pre-fill the reset panel from a `?token=…&email=…` query string so the
+    // user lands directly on the new-password form after clicking the email link.
+    this.maybeShowResetFromQuery();
+
     if (this.token && this.user) this.boot();
+    else this.showAuthPanel('login');
   }
 
-  // ─── AUTH ───────────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // AUTH UI — Tab switcher, login, register, forgot, reset
+  // ════════════════════════════════════════════════════════════════════════
   bindAuthUI() {
-    document.querySelectorAll('.auth-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        const which = tab.dataset.tab;
-        document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        document.querySelectorAll('.auth-panel').forEach(p => p.classList.remove('active'));
-        document.getElementById(which + '-panel').classList.add('active');
-        const slider = document.querySelector('.auth-tab-slider');
-        if (slider) slider.classList.toggle('right', which === 'register');
-      });
+    // Tab buttons (Sign In / Create Account)
+    document.querySelectorAll('#auth-tabs .auth-tab').forEach(tab => {
+      tab.addEventListener('click', () => this.showAuthPanel(tab.dataset.tab));
     });
 
+    // Cross-panel switchers (the inline "Create an account" / "Sign in" links
+    // and the "Forgot password?" / "Back to sign in" links).
+    document.querySelectorAll('.link-btn[data-tab]').forEach(btn => {
+      btn.addEventListener('click', () => this.showAuthPanel(btn.dataset.tab));
+    });
+
+    // Forgot password link
+    const forgotLink = document.getElementById('forgot-link');
+    if (forgotLink) forgotLink.addEventListener('click', () => this.showAuthPanel('forgot'));
+
+    // Submit buttons + Enter-key convenience
     document.getElementById('login-btn').addEventListener('click', () => this.login());
-    document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') this.login(); });
+    document.getElementById('login-password').addEventListener('keydown', e => {
+      if (e.key === 'Enter') this.login();
+    });
+    document.getElementById('login-identifier').addEventListener('keydown', e => {
+      if (e.key === 'Enter') this.login();
+    });
 
     document.getElementById('register-btn').addEventListener('click', () => this.register());
-    document.getElementById('reg-password').addEventListener('keydown', e => { if (e.key === 'Enter') this.register(); });
-  }
+    document.getElementById('reg-password-confirm').addEventListener('keydown', e => {
+      if (e.key === 'Enter') this.register();
+    });
+    document.getElementById('reg-username').addEventListener('keydown', e => {
+      if (e.key === 'Enter') this.register();
+    });
+    document.getElementById('reg-email').addEventListener('keydown', e => {
+      if (e.key === 'Enter') this.register();
+    });
 
-  async login() {
-    const username = document.getElementById('login-username').value.trim();
-    const password = document.getElementById('login-password').value;
-    const errEl = document.getElementById('login-error');
-    errEl.textContent = '';
-    if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
-    const btn = document.getElementById('login-btn');
-    btn.style.opacity = '0.6';
-    try {
-      const res = await fetch(`${API}/api/login`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+    document.getElementById('forgot-btn').addEventListener('click', () => this.forgotPassword());
+    document.getElementById('forgot-email').addEventListener('keydown', e => {
+      if (e.key === 'Enter') this.forgotPassword();
+    });
+
+    document.getElementById('reset-btn').addEventListener('click', () => this.resetPassword());
+    document.getElementById('reset-password-confirm').addEventListener('keydown', e => {
+      if (e.key === 'Enter') this.resetPassword();
+    });
+
+    // Live password-strength meters
+    const regPwInput = document.getElementById('reg-password');
+    if (regPwInput) {
+      regPwInput.addEventListener('input', () => {
+        this.updatePasswordMeter('password-meter', regPwInput.value);
       });
-      const data = await res.json();
-      if (!res.ok) { errEl.textContent = data.error; return; }
-      this.saveSession(data.token, data.user);
-      this.boot();
-    } catch { errEl.textContent = 'Cannot connect to server.'; }
-    finally { btn.style.opacity = '1'; }
+    }
+    const resetPwInput = document.getElementById('reset-password');
+    if (resetPwInput) {
+      resetPwInput.addEventListener('input', () => {
+        this.updatePasswordMeter('reset-password-meter', resetPwInput.value);
+      });
+    }
+
+    // Profile picture picker on the register panel
+    const picPicker = document.getElementById('profile-pic-picker');
+    const picInput  = document.getElementById('profile-pic-input');
+    const picRemove = document.getElementById('profile-pic-remove');
+    if (picPicker && picInput) {
+      picPicker.addEventListener('click', e => {
+        if (e.target.closest('#profile-pic-remove')) return; // ignore remove-button clicks
+        picInput.click();
+      });
+      picInput.addEventListener('change', e => {
+        const file = e.target.files && e.target.files[0];
+        if (file) this.handleRegisterPicSelection(file);
+      });
+    }
+    if (picRemove) {
+      picRemove.addEventListener('click', e => {
+        e.stopPropagation();
+        this.clearRegisterPic();
+      });
+    }
   }
 
-  async register() {
-    const username = document.getElementById('reg-username').value.trim();
-    const password = document.getElementById('reg-password').value;
+  bindProfileUI() {
+    const profileBtn = document.getElementById('profile-btn');
+    if (profileBtn) profileBtn.addEventListener('click', () => this.openProfileModal());
+
+    const closeBtn = document.getElementById('profile-modal-close');
+    if (closeBtn) closeBtn.addEventListener('click', () => this.closeProfileModal());
+
+    const cancelBtn = document.getElementById('profile-cancel-btn');
+    if (cancelBtn) cancelBtn.addEventListener('click', () => this.closeProfileModal());
+
+    const saveBtn = document.getElementById('profile-save-btn');
+    if (saveBtn) saveBtn.addEventListener('click', () => this.saveProfile());
+
+    const uploadBtn = document.getElementById('profile-pic-upload-btn');
+    const editInput = document.getElementById('profile-pic-edit-input');
+    if (uploadBtn && editInput) {
+      uploadBtn.addEventListener('click', () => editInput.click());
+      editInput.addEventListener('change', e => {
+        const file = e.target.files && e.target.files[0];
+        if (file) this.handleProfilePicUpload(file);
+      });
+    }
+
+    const removePicBtn = document.getElementById('profile-pic-remove-btn');
+    if (removePicBtn) {
+      removePicBtn.addEventListener('click', () => this.handleProfilePicRemove());
+    }
+
+    // ESC closes the profile modal
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        const modal = document.getElementById('profile-modal');
+        if (modal && !modal.classList.contains('hidden')) this.closeProfileModal();
+      }
+    });
+  }
+
+  showAuthPanel(panelName) {
+    const valid = ['login', 'register', 'forgot', 'reset'];
+    if (!valid.includes(panelName)) return;
+
+    // Clear any previous error/success state on the panel we're leaving.
+    this.clearAuthMessages();
+
+    document.querySelectorAll('#auth-tabs .auth-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.tab === panelName);
+    });
+    const slider = document.querySelector('.auth-tab-slider');
+    if (slider) {
+      // The slider only animates between "login" (left) and "register" (right).
+      slider.classList.toggle('right', panelName === 'register');
+    }
+
+    document.querySelectorAll('.auth-panel').forEach(p => p.classList.remove('active'));
+    const target = document.getElementById(`${panelName}-panel`);
+    if (target) target.classList.add('active');
+  }
+
+  maybeShowResetFromQuery() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const token  = params.get('token');
+      const email  = params.get('email');
+      if (token && email) {
+        document.getElementById('reset-token').value = token;
+        document.getElementById('reset-email').value = email;
+        document.getElementById('reset-email-display').textContent = email;
+        this.showAuthPanel('reset');
+        // Clean the URL so a page refresh doesn't re-trigger.
+        const cleanUrl = window.location.pathname;
+        window.history.replaceState({}, document.title, cleanUrl);
+      }
+    } catch (_) { /* ignore — not a real link */ }
+  }
+
+  // ─── Validation helpers ─────────────────────────────────────────────────
+  setAuthError(panelId, msg) {
+    const el = document.getElementById(`${panelId}-error`);
+    if (el) el.textContent = msg || '';
+  }
+  setAuthSuccess(panelId, msg) {
+    const el = document.getElementById(`${panelId}-success`);
+    if (el) {
+      el.textContent = msg || '';
+      el.classList.toggle('hidden', !msg);
+    }
+  }
+  clearAuthMessages() {
+    ['login', 'register', 'forgot', 'reset'].forEach(p => {
+      this.setAuthError(p, '');
+      this.setAuthSuccess(p, '');
+    });
+  }
+
+  updatePasswordMeter(meterId, password) {
+    const fillEl  = document.getElementById(`${meterId}-fill`);
+    const labelEl = document.getElementById(`${meterId}-label`);
+    if (!fillEl || !labelEl) return;
+    const { score, label } = passwordStrength(password);
+    fillEl.style.width = `${(score / 4) * 100}%`;
+    fillEl.dataset.score = String(score);
+    labelEl.textContent = `Strength: ${label}`;
+  }
+
+  // ─── Profile picture selection (register flow) ──────────────────────────
+  handleRegisterPicSelection(file) {
     const errEl = document.getElementById('register-error');
     errEl.textContent = '';
-    if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
-    const btn = document.getElementById('register-btn');
+
+    if (!file) return;
+    if (!MAX_PIC_TYPES.includes(file.type)) {
+      errEl.textContent = 'Profile picture must be PNG, JPG, GIF, or WEBP.';
+      return;
+    }
+    if (file.size > MAX_PIC_BYTES) {
+      errEl.textContent = `Profile picture must be under ${MAX_PIC_BYTES / 1024 / 1024} MB.`;
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = e => {
+      this.pendingProfilePic = { dataUrl: e.target.result, file };
+      this.renderProfilePicPreview('profile-pic-preview', e.target.result);
+      document.getElementById('profile-pic-remove').classList.remove('hidden');
+    };
+    reader.onerror = () => {
+      errEl.textContent = 'Could not read that image. Please try another.';
+    };
+    reader.readAsDataURL(file);
+  }
+
+  clearRegisterPic() {
+    this.pendingProfilePic = null;
+    const preview = document.getElementById('profile-pic-preview');
+    if (preview) {
+      preview.innerHTML = '<i class="fas fa-camera"></i>';
+      preview.style.backgroundImage = '';
+    }
+    document.getElementById('profile-pic-remove').classList.add('hidden');
+    const input = document.getElementById('profile-pic-input');
+    if (input) input.value = '';
+  }
+
+  renderProfilePicPreview(previewId, url) {
+    const el = document.getElementById(previewId);
+    if (!el) return;
+    el.style.backgroundImage = `url('${url}')`;
+    el.innerHTML = '';
+  }
+
+  // ─── LOGIN ──────────────────────────────────────────────────────────────
+  async login() {
+    const identifier = document.getElementById('login-identifier').value.trim();
+    const password   = document.getElementById('login-password').value;
+    const errEl      = document.getElementById('login-error');
+    errEl.textContent = '';
+
+    if (!identifier || !password) { errEl.textContent = 'Please fill all fields.'; return; }
+
+    const btn = document.getElementById('login-btn');
     btn.style.opacity = '0.6';
+    btn.disabled = true;
     try {
-      const res = await fetch(`${API}/api/register`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+      const res = await fetch(`${API}/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier, password }),
       });
       const data = await res.json();
-      if (!res.ok) { errEl.textContent = data.error; return; }
+      if (!res.ok) { errEl.textContent = data.error || 'Sign-in failed.'; return; }
       this.saveSession(data.token, data.user);
       this.boot();
-    } catch { errEl.textContent = 'Cannot connect to server.'; }
-    finally { btn.style.opacity = '1'; }
+    } catch {
+      errEl.textContent = 'Cannot connect to server.';
+    } finally {
+      btn.style.opacity = '1';
+      btn.disabled = false;
+    }
+  }
+
+  // ─── REGISTER ───────────────────────────────────────────────────────────
+  async register() {
+    const email    = document.getElementById('reg-email').value.trim();
+    const username = document.getElementById('reg-username').value.trim();
+    const password = document.getElementById('reg-password').value;
+    const confirm  = document.getElementById('reg-password-confirm').value;
+    const errEl    = document.getElementById('register-error');
+    errEl.textContent = '';
+
+    // Client-side validation — fast feedback before a round-trip.
+    if (!email || !username || !password || !confirm) {
+      errEl.textContent = 'Please fill all fields.'; return;
+    }
+    if (!EMAIL_RE.test(email)) {
+      errEl.textContent = 'Please enter a valid email address.'; return;
+    }
+    if (!USERNAME_RE.test(username)) {
+      errEl.textContent = 'Username must be 3–32 characters (letters, digits, _.-).'; return;
+    }
+    if (password.length < 6) {
+      errEl.textContent = 'Password must be at least 6 characters.'; return;
+    }
+    if (password !== confirm) {
+      errEl.textContent = 'Passwords do not match.'; return;
+    }
+
+    const btn = document.getElementById('register-btn');
+    btn.style.opacity = '0.6';
+    btn.disabled = true;
+    try {
+      // If the user picked a profile picture, upload it FIRST so we can pass
+      // the resulting URL on the registration POST. The upload endpoint
+      // requires auth, so we register without it then upload — the cleanest
+      // way is to register first, then upload via /api/upload-profile-picture.
+      const regRes = await fetch(`${API}/api/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, username, password }),
+      });
+      const regData = await regRes.json();
+      if (!regRes.ok) { errEl.textContent = regData.error || 'Registration failed.'; return; }
+
+      // Profile picture is optional — upload only if the user picked one.
+      let profilePictureUrl = regData.user.profilePictureUrl || '';
+      if (this.pendingProfilePic && this.pendingProfilePic.file) {
+        try {
+          const uploaded = await this.uploadProfilePicture(this.pendingProfilePic.file, regData.token);
+          if (uploaded) profilePictureUrl = uploaded;
+        } catch (err) {
+          // Don't fail registration just because the pic upload hiccuped —
+          // we already created the account. Inform but proceed.
+          console.warn('Profile picture upload failed during register:', err);
+          this.showToast('Heads up', 'Account created, but profile picture upload failed. You can retry from your profile.', 'error');
+        }
+      }
+
+      const finalUser = { ...regData.user, profilePictureUrl };
+      this.saveSession(regData.token, finalUser);
+      this.boot();
+    } catch {
+      errEl.textContent = 'Cannot connect to server.';
+    } finally {
+      btn.style.opacity = '1';
+      btn.disabled = false;
+    }
+  }
+
+  // ─── FORGOT PASSWORD ────────────────────────────────────────────────────
+  async forgotPassword() {
+    const email = document.getElementById('forgot-email').value.trim();
+    const errEl = document.getElementById('forgot-error');
+    const okEl  = document.getElementById('forgot-success');
+    errEl.textContent = '';
+    okEl.classList.add('hidden');
+    okEl.textContent = '';
+
+    if (!email) { errEl.textContent = 'Please enter your email address.'; return; }
+    if (!EMAIL_RE.test(email)) { errEl.textContent = 'Please enter a valid email address.'; return; }
+
+    const btn = document.getElementById('forgot-btn');
+    btn.style.opacity = '0.6';
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${API}/api/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json();
+      // Always show a success message regardless of whether the email was
+      // found — that's how we prevent user-enumeration.
+      okEl.textContent = data.message || 'If that email is registered, a reset link has been sent.';
+      okEl.classList.remove('hidden');
+
+      // Dev convenience — if the server included a reset link in the response
+      // (only happens in non-prod + MOCK mode), let the user click straight
+      // through to the reset form.
+      if (data.devResetLink) {
+        const link = document.createElement('a');
+        link.href = data.devResetLink;
+        link.className = 'dev-reset-link';
+        link.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Dev shortcut: open reset link';
+        link.addEventListener('click', e => {
+          e.preventDefault();
+          try {
+            const url = new URL(data.devResetLink);
+            const token = url.searchParams.get('token');
+            const mail  = url.searchParams.get('email');
+            if (token && mail) {
+              document.getElementById('reset-token').value = token;
+              document.getElementById('reset-email').value  = mail;
+              document.getElementById('reset-email-display').textContent = mail;
+              this.showAuthPanel('reset');
+            }
+          } catch (_) { /* ignore */ }
+        });
+        okEl.appendChild(document.createElement('br'));
+        okEl.appendChild(link);
+      }
+    } catch {
+      errEl.textContent = 'Cannot connect to server.';
+    } finally {
+      btn.style.opacity = '1';
+      btn.disabled = false;
+    }
+  }
+
+  // ─── RESET PASSWORD ─────────────────────────────────────────────────────
+  async resetPassword() {
+    const token       = document.getElementById('reset-token').value.trim();
+    const email       = document.getElementById('reset-email').value.trim();
+    const newPassword = document.getElementById('reset-password').value;
+    const confirm     = document.getElementById('reset-password-confirm').value;
+    const errEl       = document.getElementById('reset-error');
+    errEl.textContent = '';
+
+    if (!token) { errEl.textContent = 'Missing reset token. Please request a new link.'; return; }
+    if (!newPassword || !confirm) { errEl.textContent = 'Please fill all fields.'; return; }
+    if (newPassword.length < 6) { errEl.textContent = 'Password must be at least 6 characters.'; return; }
+    if (newPassword !== confirm) { errEl.textContent = 'Passwords do not match.'; return; }
+
+    const btn = document.getElementById('reset-btn');
+    btn.style.opacity = '0.6';
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${API}/api/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, email, newPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) { errEl.textContent = data.error || 'Reset failed.'; return; }
+      this.saveSession(data.token, data.user);
+      this.boot();
+    } catch {
+      errEl.textContent = 'Cannot connect to server.';
+    } finally {
+      btn.style.opacity = '1';
+      btn.disabled = false;
+    }
+  }
+
+  // ─── Profile picture upload (used by register & profile editor) ─────────
+  async uploadProfilePicture(file, explicitToken) {
+    const formData = new FormData();
+    formData.append('picture', file);
+    const token = explicitToken || this.token;
+    if (!token) throw new Error('Not signed in.');
+    const res = await fetch(`${API}/api/upload-profile-picture`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed.');
+    return data.profilePictureUrl;
   }
 
   saveSession(token, user) {
@@ -121,13 +537,177 @@ class ZapChat {
     location.reload();
   }
 
-  // ─── BOOT ────────────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // PROFILE EDITOR MODAL
+  // ════════════════════════════════════════════════════════════════════════
+  openProfileModal() {
+    if (!this.user) return;
+    const modal = document.getElementById('profile-modal');
+    if (!modal) return;
+
+    // Populate fields
+    document.getElementById('profile-email').value    = this.user.email || '';
+    document.getElementById('profile-username').value = this.user.username || '';
+    document.getElementById('profile-status').value   = this.user.status || '';
+
+    const preview = document.getElementById('profile-pic-edit-preview');
+    if (preview) {
+      if (this.user.profilePictureUrl) {
+        preview.style.backgroundImage = `url('${this.user.profilePictureUrl}')`;
+        preview.innerHTML = '';
+      } else {
+        preview.style.backgroundImage = '';
+        preview.innerHTML = '<i class="fas fa-user"></i>';
+      }
+    }
+
+    const removeBtn = document.getElementById('profile-pic-remove-btn');
+    if (removeBtn) {
+      removeBtn.classList.toggle('hidden', !this.user.profilePictureUrl);
+    }
+
+    document.getElementById('profile-error').textContent = '';
+    document.getElementById('profile-success').classList.add('hidden');
+
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+
+  closeProfileModal() {
+    const modal = document.getElementById('profile-modal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+
+  async handleProfilePicUpload(file) {
+    const errEl = document.getElementById('profile-error');
+    const okEl  = document.getElementById('profile-success');
+    errEl.textContent = '';
+    okEl.classList.add('hidden');
+
+    if (!file) return;
+    if (!MAX_PIC_TYPES.includes(file.type)) {
+      errEl.textContent = 'Profile picture must be PNG, JPG, GIF, or WEBP.'; return;
+    }
+    if (file.size > MAX_PIC_BYTES) {
+      errEl.textContent = `Profile picture must be under ${MAX_PIC_BYTES / 1024 / 1024} MB.`; return;
+    }
+
+    try {
+      // Show a local preview immediately for snappy UX.
+      const reader = new FileReader();
+      reader.onload = e => {
+        this.renderProfilePicPreview('profile-pic-edit-preview', e.target.result);
+      };
+      reader.readAsDataURL(file);
+
+      const url = await this.uploadProfilePicture(file);
+      this.user.profilePictureUrl = url;
+      localStorage.setItem('zc_user', JSON.stringify(this.user));
+      this.applyMyAvatar();
+      document.getElementById('profile-pic-remove-btn').classList.remove('hidden');
+      okEl.textContent = 'Profile picture updated.';
+      okEl.classList.remove('hidden');
+    } catch (err) {
+      errEl.textContent = err.message || 'Upload failed.';
+      // Restore the previous preview on failure.
+      if (this.user.profilePictureUrl) {
+        this.renderProfilePicPreview('profile-pic-edit-preview', this.user.profilePictureUrl);
+      } else {
+        const preview = document.getElementById('profile-pic-edit-preview');
+        preview.style.backgroundImage = '';
+        preview.innerHTML = '<i class="fas fa-user"></i>';
+      }
+    }
+  }
+
+  async handleProfilePicRemove() {
+    if (!this.user) return;
+    const errEl = document.getElementById('profile-error');
+    const okEl  = document.getElementById('profile-success');
+    errEl.textContent = '';
+    okEl.classList.add('hidden');
+
+    try {
+      const res = await fetch(`${API}/api/me`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.token}`,
+        },
+        body: JSON.stringify({ profilePictureUrl: '' }),
+      });
+      const data = await res.json();
+      if (!res.ok) { errEl.textContent = data.error || 'Could not remove picture.'; return; }
+
+      this.user = data.user;
+      localStorage.setItem('zc_user', JSON.stringify(this.user));
+      this.applyMyAvatar();
+
+      const preview = document.getElementById('profile-pic-edit-preview');
+      preview.style.backgroundImage = '';
+      preview.innerHTML = '<i class="fas fa-user"></i>';
+      document.getElementById('profile-pic-remove-btn').classList.add('hidden');
+      okEl.textContent = 'Profile picture removed.';
+      okEl.classList.remove('hidden');
+    } catch {
+      errEl.textContent = 'Cannot connect to server.';
+    }
+  }
+
+  async saveProfile() {
+    const username = document.getElementById('profile-username').value.trim();
+    const status   = document.getElementById('profile-status').value.trim();
+    const errEl    = document.getElementById('profile-error');
+    const okEl     = document.getElementById('profile-success');
+    errEl.textContent = '';
+    okEl.classList.add('hidden');
+
+    if (username && !USERNAME_RE.test(username)) {
+      errEl.textContent = 'Username must be 3–32 characters (letters, digits, _.-).'; return;
+    }
+
+    const btn = document.getElementById('profile-save-btn');
+    btn.style.opacity = '0.6';
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${API}/api/me`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.token}`,
+        },
+        body: JSON.stringify({ username: username || undefined, status }),
+      });
+      const data = await res.json();
+      if (!res.ok) { errEl.textContent = data.error || 'Save failed.'; return; }
+
+      this.user = data.user;
+      if (data.token) this.token = data.token;
+      localStorage.setItem('zc_user', JSON.stringify(this.user));
+      if (data.token) localStorage.setItem('zc_token', data.token);
+
+      this.applyMyAvatar();
+      okEl.textContent = 'Profile saved.';
+      okEl.classList.remove('hidden');
+    } catch {
+      errEl.textContent = 'Cannot connect to server.';
+    } finally {
+      btn.style.opacity = '1';
+      btn.disabled = false;
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // BOOT — main app shell after auth
+  // ════════════════════════════════════════════════════════════════════════
   boot() {
     document.getElementById('auth-screen').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
 
-    document.getElementById('me-avatar').textContent = this.user.username.charAt(0).toUpperCase();
-    document.getElementById('me-name').textContent = this.user.username;
+    this.applyMyAvatar();
+    this.domCache.meName.textContent = this.user.username;
 
     document.getElementById('logout-btn').addEventListener('click', () => {
       if (confirm('Sign out?')) this.logout();
@@ -138,8 +718,8 @@ class ZapChat {
         document.querySelectorAll('.s-tab').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         const sec = tab.dataset.section;
-        document.getElementById('chats-section').classList.toggle('hidden', sec !== 'chats');
-        document.getElementById('contacts-section').classList.toggle('hidden', sec !== 'contacts');
+        this.domCache.chatsSection.classList.toggle('hidden', sec !== 'chats');
+        this.domCache.contactsSection.classList.toggle('hidden', sec !== 'contacts');
       });
     });
 
@@ -166,15 +746,50 @@ class ZapChat {
     });
     document.addEventListener('click', () => this.domCache.emojiPicker.classList.add('hidden'));
 
-    const toasts = document.createElement('div');
-    toasts.className = 'toast-container';
-    document.body.appendChild(toasts);
+    if (!document.querySelector('.toast-container')) {
+      const toasts = document.createElement('div');
+      toasts.className = 'toast-container';
+      document.body.appendChild(toasts);
+    }
 
     this.connectSocket();
     this.fetchUsers();
+    this.refreshMyProfile();
   }
 
-  // ─── SOCKET ──────────────────────────────────────────────────────────────
+  applyMyAvatar() {
+    const avatarEl = this.domCache.meAvatar;
+    if (!avatarEl) return;
+    if (this.user && this.user.profilePictureUrl) {
+      avatarEl.classList.add('has-image');
+      avatarEl.style.backgroundImage = `url('${this.user.profilePictureUrl}')`;
+      avatarEl.textContent = '';
+    } else {
+      avatarEl.classList.remove('has-image');
+      avatarEl.style.backgroundImage = '';
+      avatarEl.textContent = (this.user && this.user.username ? this.user.username.charAt(0).toUpperCase() : '?');
+    }
+  }
+
+  async refreshMyProfile() {
+    // Pull the freshest profile data so the avatar / username are always
+    // up-to-date even after the user changes them on another device.
+    try {
+      const res = await fetch(`${API}/api/me`, {
+        headers: { Authorization: `Bearer ${this.token}` },
+      });
+      if (!res.ok) return;
+      const fresh = await res.json();
+      this.user = { ...this.user, ...fresh };
+      localStorage.setItem('zc_user', JSON.stringify(this.user));
+      this.applyMyAvatar();
+      this.domCache.meName.textContent = this.user.username;
+    } catch (_) { /* offline / network blip — keep cached profile */ }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // SOCKET
+  // ════════════════════════════════════════════════════════════════════════
   connectSocket() {
     this.socket = io(API, {
       auth: { token: this.token },
@@ -250,7 +865,9 @@ class ZapChat {
     this.socket.on('call_failed', ({ reason }) => this.showToast('Call Failed', reason, 'error'));
   }
 
-  // ─── USERS / CONTACTS ────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // USERS / CONTACTS
+  // ════════════════════════════════════════════════════════════════════════
   async fetchUsers() {
     try {
       const res = await fetch(`${API}/api/users`, {
@@ -293,10 +910,14 @@ class ZapChat {
     const unread   = chatData?.unread || 0;
     const typing   = chatData?.typing || false;
 
+    const avatarBg = user.profilePictureUrl
+      ? `style="background-image:url('${user.profilePictureUrl}')"`
+      : '';
+
     div.innerHTML = `
-      <div class="c-avatar ${isOnline ? 'online' : ''}">${user.username.charAt(0).toUpperCase()}</div>
+      <div class="c-avatar ${isOnline ? 'online' : ''} ${user.profilePictureUrl ? 'has-image' : ''}" ${avatarBg}>${user.profilePictureUrl ? '' : this.escHtml(user.username.charAt(0).toUpperCase())}</div>
       <div class="c-info">
-        <div class="c-name">${user.username}</div>
+        <div class="c-name">${this.escHtml(user.username)}</div>
         <div class="c-last ${typing ? 'typing' : ''}">${typing ? '✍️ typing…' : this.escHtml(lastMsg)}</div>
       </div>
       <div class="c-meta">
@@ -331,7 +952,9 @@ class ZapChat {
     }
   }
 
-  // ─── OPEN / CLOSE CHAT ───────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // OPEN / CLOSE CHAT
+  // ════════════════════════════════════════════════════════════════════════
   async openChat(username) {
     if (this.activeChat === username) return;
 
@@ -342,7 +965,20 @@ class ZapChat {
     this.socket.emit('mark_read', { from: username });
 
     document.getElementById('chat-name').textContent = username;
-    document.getElementById('chat-avatar').textContent = username.charAt(0).toUpperCase();
+
+    const avatar = document.getElementById('chat-avatar');
+    // Try to find this user's profile picture from the cached contacts list
+    const cached = this.findCachedUser(username);
+    if (cached && cached.profilePictureUrl) {
+      avatar.classList.add('has-image');
+      avatar.style.backgroundImage = `url('${cached.profilePictureUrl}')`;
+      avatar.textContent = '';
+    } else {
+      avatar.classList.remove('has-image');
+      avatar.style.backgroundImage = '';
+      avatar.textContent = username.charAt(0).toUpperCase();
+    }
+
     this.domCache.chatStatus.textContent = this.onlineSet.has(username) ? '🟢 Online' : '🔒 Encrypted';
 
     document.getElementById('chat-empty').classList.add('hidden');
@@ -383,13 +1019,27 @@ class ZapChat {
     this.updateChatListItem(username);
   }
 
+  findCachedUser(username) {
+    // Search the contacts list DOM cache for the matching row's avatar URL.
+    const row = this.domCache.usersList.querySelector(`.contact-item[data-username="${username}"]`);
+    if (!row) return null;
+    const avatar = row.querySelector('.c-avatar');
+    if (!avatar) return null;
+    const bg = avatar.style.backgroundImage;
+    if (!bg) return null;
+    const match = bg.match(/url\(["']?([^"')]+)["']?\)/);
+    return match ? { profilePictureUrl: match[1] } : null;
+  }
+
   closeChatMobile() {
     document.querySelector('.chat-panel').classList.remove('visible');
     document.querySelector('.sidebar').classList.remove('hidden-mobile');
     this.activeChat = null;
   }
 
-  // ─── MESSAGES ────────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // MESSAGES
+  // ════════════════════════════════════════════════════════════════════════
   sendMessage() {
     const input = this.domCache.messageInput;
     const text = input.value.trim();
@@ -469,7 +1119,9 @@ class ZapChat {
     });
   }
 
-  // ─── TYPING ──────────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // TYPING
+  // ════════════════════════════════════════════════════════════════════════
   onInputChange() {
     const input = this.domCache.messageInput;
     input.style.height = 'auto';
@@ -507,12 +1159,14 @@ class ZapChat {
     document.getElementById('typing-indicator')?.remove();
   }
 
-  // ─── CHAT LIST MANAGEMENT ─────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // CHAT LIST MANAGEMENT
+  // ════════════════════════════════════════════════════════════════════════
   updateChatListItem(username) {
     const chat = this.chats.get(username);
     const isOnline = this.onlineSet.has(username);
 
-    const containers = [this.domCache.chatsSection, document.getElementById('contacts-section')];
+    const containers = [this.domCache.chatsSection, this.domCache.contactsSection];
 
     containers.forEach(container => {
       if (!container) return;
@@ -560,7 +1214,9 @@ class ZapChat {
     section.insertBefore(el, section.firstChild);
   }
 
-  // ─── EMOJI ───────────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // EMOJI
+  // ════════════════════════════════════════════════════════════════════════
   buildEmojiPicker() {
     const picker = this.domCache.emojiPicker;
     const fragment = document.createDocumentFragment();
@@ -581,7 +1237,9 @@ class ZapChat {
     picker.appendChild(fragment);
   }
 
-  // ─── CALLING ─────────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // CALLING
+  // ════════════════════════════════════════════════════════════════════════
   async startCall(callType) {
     if (!this.activeChat) return;
     const toUser = this.activeChat;
@@ -761,7 +1419,9 @@ class ZapChat {
     else await this.meeting.startVideo();
   }
 
-  // ─── TOASTS ──────────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // TOASTS
+  // ════════════════════════════════════════════════════════════════════════
   showToast(title, body, type = 'message') {
     const container = document.querySelector('.toast-container');
     if (!container) return;
@@ -775,7 +1435,9 @@ class ZapChat {
     setTimeout(() => toast.remove(), 4200);
   }
 
-  // ─── UTILS ───────────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // UTILS
+  // ════════════════════════════════════════════════════════════════════════
   scrollBottom() {
     const area = this.domCache.messagesArea;
     requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
