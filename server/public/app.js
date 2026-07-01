@@ -1,329 +1,366 @@
-/* ═══════════════════════════════════════════
-   ZapChat – Client App (With Call Support)
-   ═══════════════════════════════════════════ */
-
-// ─── Backend API base URL ─────────────────────────────────────────────────────
-// FIXED: this must point at your Railway BACKEND, not your Cloudflare Pages
-// frontend. zapchat-5ru.pages.dev is a static site with no /api routes and
-// no Socket.io server — that mismatch was the cause of "Cannot connect to
-// server." on signup/login. Both API and BACKEND_SERVER now point at the
-// same Railway URL since there's only one backend.
-const API = 'https://zapchat-production.up.railway.app';
-const BACKEND_SERVER = API; // kept as an alias so existing references below still work
+const API = window.ZAPCHAT_API_URL || (() => {
+  const { hostname, port, origin } = window.location;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return port === '3000' ? 'http://localhost:5000' : origin;
+  }
+  if (origin.includes('pages.dev')) return 'https://zapchat-production.up.railway.app';
+  return origin;
+})();
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
 class ZapChat {
   constructor() {
-    this.socket     = null;
-    this.token      = localStorage.getItem('zc_token');
-    this.user       = JSON.parse(localStorage.getItem('zc_user') || 'null');
-    this.activeChat = null;      // username of current chat partner
-    this.chats      = new Map();  // username → { messages[], unread, lastMsg, lastTime, typing }
-    this.onlineSet  = new Set();
+    this.api = API;
+    this.user = null;
+    this.socket = null;
+    this.activeChat = null;
+    this.chats = new Map();
+    this.onlineSet = new Set();
     this.typingTimer = null;
-    this.isTyping   = false;
-    this.activeCallRoom = null;   // { roomName, with } while a call is in progress
+    this.isTyping = false;
+    this.resetToken = new URLSearchParams(window.location.search).get('resetToken') || '';
+    this.callRoom = null;
+    this.boundApp = false;
 
-    // Cache frequent DOM elements for rendering performance
-    this.domCache = {
+    this.dom = {
+      authScreen: document.getElementById('auth-screen'),
+      authTabs: document.querySelector('.auth-tabs'),
+      loginPanel: document.getElementById('login-panel'),
+      registerPanel: document.getElementById('register-panel'),
+      forgotPanel: document.getElementById('forgot-panel'),
+      resetPanel: document.getElementById('reset-panel'),
+      loginError: document.getElementById('login-error'),
+      signupError: document.getElementById('signup-error'),
+      forgotError: document.getElementById('forgot-error'),
+      resetError: document.getElementById('reset-error'),
+      loginIdentifier: document.getElementById('login-identifier'),
+      loginPassword: document.getElementById('login-password'),
+      signupUsername: document.getElementById('signup-username'),
+      signupEmail: document.getElementById('signup-email'),
+      signupPassword: document.getElementById('signup-password'),
+      forgotEmail: document.getElementById('forgot-email'),
+      resetPassword: document.getElementById('reset-password'),
+      resetConfirm: document.getElementById('reset-confirm'),
+      loginBtn: document.getElementById('login-btn'),
+      signupBtn: document.getElementById('signup-btn'),
+      forgotBtn: document.getElementById('forgot-btn'),
+      resetBtn: document.getElementById('reset-btn'),
+      googleLoginBtn: document.getElementById('google-login-btn'),
+      googleSignupBtn: document.getElementById('google-signup-btn'),
+      showForgotBtn: document.getElementById('show-forgot-btn'),
+      backFromForgotBtn: document.getElementById('back-to-login-from-forgot'),
+      backFromResetBtn: document.getElementById('back-to-login-from-reset'),
+      authScreenHiddenClass: 'hidden',
+      app: document.getElementById('app'),
+      meAvatar: document.getElementById('me-avatar'),
+      meName: document.getElementById('me-name'),
+      logoutBtn: document.getElementById('logout-btn'),
+      searchInput: document.getElementById('search-input'),
+      chatsSection: document.getElementById('chats-section'),
+      contactsSection: document.getElementById('contacts-section'),
+      usersList: document.getElementById('users-list'),
+      chatEmpty: document.getElementById('chat-empty'),
+      activeChat: document.getElementById('active-chat'),
+      chatName: document.getElementById('chat-name'),
+      chatAvatar: document.getElementById('chat-avatar'),
+      chatStatus: document.getElementById('chat-status'),
       messagesArea: document.getElementById('messages-area'),
       messageInput: document.getElementById('message-input'),
-      chatStatus: document.getElementById('chat-status'),
+      sendBtn: document.getElementById('send-btn'),
+      backBtn: document.getElementById('back-btn'),
+      emojiBtn: document.querySelector('.emoji-btn'),
       emojiPicker: document.getElementById('emoji-picker'),
-      usersList: document.getElementById('users-list'),
-      chatsSection: document.getElementById('chats-section'),
+      voiceCallBtn: document.getElementById('voice-call-btn'),
+      videoCallBtn: document.getElementById('video-call-btn'),
+      callModal: document.getElementById('call-modal'),
+      callTitleText: document.getElementById('call-title-text'),
+      callStatusText: document.getElementById('call-status-text'),
+      callRemoteGrid: document.getElementById('call-remote-grid'),
+      callEmpty: document.getElementById('call-empty'),
+      callRosterList: document.getElementById('call-roster-list'),
+      callRosterCount: document.getElementById('call-roster-count'),
+      callHangupBtn: document.getElementById('call-hangup-btn'),
     };
 
     this.bindAuthUI();
-    if (this.token && this.user) this.boot();
+    this.initAuthState();
   }
 
-  // ─── AUTH ───────────────────────────────────────────────────────────────
   bindAuthUI() {
-    // Tab switching
-    document.querySelectorAll('.auth-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        const which = tab.dataset.tab;
-        document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        document.querySelectorAll('.auth-panel').forEach(p => p.classList.remove('active'));
-        document.getElementById(which + '-panel').classList.add('active');
-        const slider = document.querySelector('.auth-tab-slider');
-        if (slider) slider.classList.toggle('right', which === 'register');
-      });
+    document.querySelectorAll('.auth-tab').forEach((tab) => {
+      tab.addEventListener('click', () => this.showAuthPanel(tab.dataset.tab));
     });
 
-    // Login
-    document.getElementById('login-btn').addEventListener('click', () => this.login());
-    document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') this.login(); });
+    this.dom.loginBtn?.addEventListener('click', () => this.login());
+    this.dom.signupBtn?.addEventListener('click', () => this.signup());
+    this.dom.forgotBtn?.addEventListener('click', () => this.forgotPassword());
+    this.dom.resetBtn?.addEventListener('click', () => this.resetPassword());
+    this.dom.googleLoginBtn?.addEventListener('click', () => this.startGoogleAuth());
+    this.dom.googleSignupBtn?.addEventListener('click', () => this.startGoogleAuth());
+    this.dom.showForgotBtn?.addEventListener('click', () => this.showAuthPanel('forgot'));
+    this.dom.backFromForgotBtn?.addEventListener('click', () => this.showAuthPanel('login'));
+    this.dom.backFromResetBtn?.addEventListener('click', () => this.showAuthPanel('login'));
 
-    // Register
-    document.getElementById('register-btn').addEventListener('click', () => this.register());
-    document.getElementById('reg-password').addEventListener('keydown', e => { if (e.key === 'Enter') this.register(); });
+    this.dom.loginPassword?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') this.login();
+    });
+    this.dom.signupPassword?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') this.signup();
+    });
+    this.dom.resetConfirm?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') this.resetPassword();
+    });
+  }
+
+  showAuthPanel(name) {
+    const panels = [this.dom.loginPanel, this.dom.registerPanel, this.dom.forgotPanel, this.dom.resetPanel];
+    panels.forEach((panel) => panel?.classList.remove('active'));
+
+    const mapping = {
+      login: this.dom.loginPanel,
+      register: this.dom.registerPanel,
+      forgot: this.dom.forgotPanel,
+      reset: this.dom.resetPanel,
+    };
+
+    mapping[name]?.classList.add('active');
+    this.dom.authTabs?.classList.toggle('hidden', name === 'reset' || name === 'forgot');
+  }
+
+  async initAuthState() {
+    if (this.resetToken) {
+      this.showAuthPanel('reset');
+    } else {
+      this.showAuthPanel('login');
+    }
+
+    try {
+      const res = await fetch(`${this.api}/api/auth/me`, { credentials: 'include' });
+      if (!res.ok) {
+        return;
+      }
+      const data = await res.json();
+      this.user = data.user;
+      this.enterApp();
+    } catch {
+      // stay on auth screen
+    }
   }
 
   async login() {
-    const username = document.getElementById('login-username').value.trim();
-    const password = document.getElementById('login-password').value;
-    const errEl = document.getElementById('login-error');
-    errEl.textContent = '';
-    if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
-    const btn = document.getElementById('login-btn');
-    btn.style.opacity = '0.6';
-    try {
-      const res = await fetch(`${API}/api/login`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
-      });
-      // FIXED: guard against non-JSON responses (e.g. a 404/HTML page from a
-      // misconfigured host) instead of letting res.json() throw and falling
-      // into the generic "Cannot connect to server." message every time.
-      let data;
-      try { data = await res.json(); }
-      catch { errEl.textContent = `Server returned an unexpected response (status ${res.status}). Check the API URL.`; return; }
-      if (!res.ok) { errEl.textContent = data.error || `Login failed (status ${res.status}).`; return; }
-      this.saveSession(data.token, data.user);
-      this.boot();
-    } catch (err) {
-      console.error('Login network error:', err);
-      errEl.textContent = 'Cannot connect to server.';
+    this.clearErrors();
+    const identifier = this.dom.loginIdentifier.value.trim();
+    const password = this.dom.loginPassword.value;
+    if (!identifier || !password) {
+      this.dom.loginError.textContent = 'Enter your username/email and password.';
+      return;
     }
-    finally { btn.style.opacity = '1'; }
-  }
 
-  async register() {
-    const username = document.getElementById('reg-username').value.trim();
-    const password = document.getElementById('reg-password').value;
-    const errEl = document.getElementById('register-error');
-    errEl.textContent = '';
-    if (!username || !password) { errEl.textContent = 'Please fill all fields.'; return; }
-    const btn = document.getElementById('register-btn');
-    btn.style.opacity = '0.6';
     try {
-      const res = await fetch(`${API}/api/register`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+      const res = await fetch(`${this.api}/api/auth/login`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier, password }),
       });
-      let data;
-      try { data = await res.json(); }
-      catch { errEl.textContent = `Server returned an unexpected response (status ${res.status}). Check the API URL.`; return; }
-      if (!res.ok) { errEl.textContent = data.error || `Registration failed (status ${res.status}).`; return; }
-      this.saveSession(data.token, data.user);
-      this.boot();
-    } catch (err) {
-      console.error('Register network error:', err);
-      errEl.textContent = 'Cannot connect to server.';
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.dom.loginError.textContent = data.error || 'Login failed.';
+        return;
+      }
+      this.user = data.user;
+      this.enterApp();
+    } catch {
+      this.dom.loginError.textContent = 'Cannot connect to server.';
     }
-    finally { btn.style.opacity = '1'; }
   }
 
-  saveSession(token, user) {
-    this.token = token;
-    this.user  = user;
-    localStorage.setItem('zc_token', token);
-    localStorage.setItem('zc_user', JSON.stringify(user));
+  async signup() {
+    this.clearErrors();
+    const username = this.dom.signupUsername.value.trim();
+    const email = this.dom.signupEmail.value.trim();
+    const password = this.dom.signupPassword.value;
+    if (!username || !email || !password) {
+      this.dom.signupError.textContent = 'Fill in username, email, and password.';
+      return;
+    }
+
+    try {
+      const res = await fetch(`${this.api}/api/auth/signup`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, email, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.dom.signupError.textContent = data.error || 'Signup failed.';
+        return;
+      }
+      this.user = data.user;
+      this.enterApp();
+    } catch {
+      this.dom.signupError.textContent = 'Cannot connect to server.';
+    }
   }
 
-  logout() {
-    localStorage.removeItem('zc_token');
-    localStorage.removeItem('zc_user');
+  async forgotPassword() {
+    this.clearErrors();
+    const email = this.dom.forgotEmail.value.trim();
+    if (!email) {
+      this.dom.forgotError.textContent = 'Enter the email address for your account.';
+      return;
+    }
+
+    try {
+      const res = await fetch(`${this.api}/api/auth/forgot-password`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.dom.forgotError.textContent = data.error || 'Could not send reset email.';
+        return;
+      }
+      this.dom.forgotError.textContent = data.message || 'If the email exists, a reset link has been sent.';
+    } catch {
+      this.dom.forgotError.textContent = 'Cannot connect to server.';
+    }
+  }
+
+  async resetPassword() {
+    this.clearErrors();
+    const password = this.dom.resetPassword.value;
+    const confirmPassword = this.dom.resetConfirm.value;
+    if (!this.resetToken) {
+      this.dom.resetError.textContent = 'Missing reset token.';
+      return;
+    }
+    if (!password || !confirmPassword) {
+      this.dom.resetError.textContent = 'Enter and confirm your new password.';
+      return;
+    }
+
+    try {
+      const res = await fetch(`${this.api}/api/auth/reset-password`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: this.resetToken, password, confirmPassword }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.dom.resetError.textContent = data.error || 'Reset failed.';
+        return;
+      }
+      window.history.replaceState({}, document.title, window.location.pathname);
+      this.user = data.user;
+      this.enterApp();
+    } catch {
+      this.dom.resetError.textContent = 'Cannot connect to server.';
+    }
+  }
+
+  startGoogleAuth() {
+    window.location.href = `${this.api}/api/auth/google`;
+  }
+
+  async logout() {
+    try {
+      await fetch(`${this.api}/api/auth/logout`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch {
+      // ignore
+    }
     if (this.socket) this.socket.disconnect();
-    location.reload();
+    this.socket = null;
+    this.user = null;
+    this.activeChat = null;
+    this.chats.clear();
+    this.onlineSet.clear();
+    this.boundApp = false;
+    this.dom.app.classList.add('hidden');
+    this.dom.authScreen.classList.remove('hidden');
+    this.showAuthPanel('login');
   }
 
-  // ─── BOOT ────────────────────────────────────────────────────────────────
-  boot() {
-    document.getElementById('auth-screen').classList.add('hidden');
-    document.getElementById('app').classList.remove('hidden');
+  clearErrors() {
+    this.dom.loginError.textContent = '';
+    this.dom.signupError.textContent = '';
+    this.dom.forgotError.textContent = '';
+    this.dom.resetError.textContent = '';
+  }
 
-    // Set my avatar
-    document.getElementById('me-avatar').textContent = this.user.username.charAt(0).toUpperCase();
-    document.getElementById('me-name').textContent = this.user.username;
+  enterApp() {
+    this.dom.authScreen.classList.add('hidden');
+    this.dom.app.classList.remove('hidden');
+    this.dom.meAvatar.textContent = this.user.username.charAt(0).toUpperCase();
+    this.dom.meName.textContent = this.user.displayName || this.user.username;
 
-    // Logout
-    document.getElementById('logout-btn').addEventListener('click', () => {
-      if (confirm('Sign out?')) this.logout();
-    });
-
-    // Sidebar tabs
-    document.querySelectorAll('.s-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        document.querySelectorAll('.s-tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        const sec = tab.dataset.section;
-        document.getElementById('chats-section').classList.toggle('hidden', sec !== 'chats');
-        document.getElementById('contacts-section').classList.toggle('hidden', sec !== 'contacts');
-      });
-    });
-
-    // Search
-    document.getElementById('search-input').addEventListener('input', e => this.filterContacts(e.target.value));
-
-    // Message input references
-    const input = this.domCache.messageInput;
-    input.addEventListener('input', () => this.onInputChange());
-    input.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.sendMessage(); }
-    });
-
-    // Send button
-    document.getElementById('send-btn').addEventListener('click', () => this.sendMessage());
-
-    // Back button (mobile)
-    document.getElementById('back-btn').addEventListener('click', () => this.closeChatMobile());
-
-    // Call Action Buttons (Voice & Video)
-    const voiceBtn = document.getElementById('voice-call-btn');
-    const videoBtn = document.getElementById('video-call-btn');
-    if (voiceBtn) voiceBtn.addEventListener('click', () => this.initiateCall('audio'));
-    if (videoBtn) videoBtn.addEventListener('click', () => this.initiateCall('video'));
-
-    // Emoji
-    document.querySelector('.emoji-btn').addEventListener('click', e => {
-      e.stopPropagation();
-      const picker = this.domCache.emojiPicker;
-      picker.classList.toggle('hidden');
-      if (!picker.children.length) this.buildEmojiPicker();
-    });
-    document.addEventListener('click', () => this.domCache.emojiPicker.classList.add('hidden'));
-
-    // Toast container installation
-    const toasts = document.createElement('div');
-    toasts.className = 'toast-container';
-    document.body.appendChild(toasts);
+    if (!this.boundApp) {
+      this.bindAppUI();
+      this.boundApp = true;
+    }
 
     this.connectSocket();
     this.fetchUsers();
   }
 
-  // ─── CALL HANDLING ───────────────────────────────────────────────────────
-  // FIXED: this now matches the server's actual contract.
-  //   - Room creation endpoint is POST /api/create-room (server only defines
-  //     this route; the old code called a nonexistent /api/calls/room).
-  //   - Outgoing signal is the socket event 'call_invite' with
-  //     { to, callType, roomURL, roomName } (server listens for exactly
-  //     this shape and relays it as 'call_invite' to the recipient).
-  //   - type is now passed through as 'audio' | 'video' to match what the
-  //     server comment and recipient UI expect (previously sent 'voice').
-  async initiateCall(callType) {
-    if (!this.activeChat) return;
-    if (!this.onlineSet.has(this.activeChat)) {
-      this.showToast('Cannot call', `${this.activeChat} is offline.`, 'error');
-      return;
-    }
+  bindAppUI() {
+    this.dom.logoutBtn?.addEventListener('click', () => {
+      if (confirm('Sign out?')) this.logout();
+    });
 
-    this.showToast('Calling…', `Starting ${callType} call with ${this.activeChat}`, 'message');
-
-    try {
-      const response = await fetch(`${API}/api/create-room`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.token}`
-        },
-        body: JSON.stringify({ with: this.activeChat, privacy: 'private' })
+    document.querySelectorAll('.s-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.s-tab').forEach((item) => item.classList.remove('active'));
+        tab.classList.add('active');
+        const section = tab.dataset.section;
+        this.dom.chatsSection.classList.toggle('hidden', section !== 'chats');
+        this.dom.contactsSection.classList.toggle('hidden', section !== 'contacts');
       });
+    });
 
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Server rejected call setup request.');
+    this.dom.searchInput?.addEventListener('input', (event) => this.filterContacts(event.target.value));
+    this.dom.messageInput?.addEventListener('input', () => this.onInputChange());
+    this.dom.messageInput?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        this.sendMessage();
       }
-
-      this.activeCallRoom = { roomName: data.roomName, with: this.activeChat };
-
-      // Notify the other user over the socket so their client can ring + join.
-      this.socket.emit('call_invite', {
-        to: this.activeChat,
-        callType,
-        roomURL: data.publicURL,
-        roomName: data.roomName,
-      });
-
-      this.joinCallRoom(data.publicURL);
-
-    } catch (err) {
-      console.error('Failed to initiate call:', err);
-      this.showToast('Call Error', err.message || 'Could not connect to voice/video services.', 'error');
-    }
+    });
+    this.dom.sendBtn?.addEventListener('click', () => this.sendMessage());
+    this.dom.backBtn?.addEventListener('click', () => this.closeChatMobile());
+    this.dom.emojiBtn?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.dom.emojiPicker.classList.toggle('hidden');
+      if (!this.dom.emojiPicker.children.length) this.buildEmojiPicker();
+    });
+    document.addEventListener('click', () => this.dom.emojiPicker.classList.add('hidden'));
+    this.dom.voiceCallBtn?.addEventListener('click', () => this.initiateCall('audio'));
+    this.dom.videoCallBtn?.addEventListener('click', () => this.initiateCall('video'));
+    this.dom.callHangupBtn?.addEventListener('click', () => this.endCall());
   }
 
-  joinCallRoom(callUrl) {
-    // Opens the Metered room URL the server already built and returned
-    // (data.publicURL from /api/create-room) — no more manually
-    // reconstructing the domain/path on the client.
-    const callWindow = window.open(callUrl, 'ZapChat Call', 'width=800,height=600');
-    if (!callWindow) {
-      this.showToast('Popup Blocked', 'Please allow popups to enter the call screen room.', 'error');
-    }
-  }
-
-  endCall() {
-    if (!this.activeCallRoom) return;
-    this.socket.emit('call_end', { to: this.activeCallRoom.with });
-    this.activeCallRoom = null;
-  }
-
-  // ─── SOCKET ──────────────────────────────────────────────────────────────
   connectSocket() {
-    this.socket = io(API, {
-      auth: { token: this.token },
+    if (this.socket) this.socket.disconnect();
+    this.socket = io(this.api, {
+      withCredentials: true,
       transports: ['websocket', 'polling'],
-      secure: true,
       reconnectionAttempts: 5,
-      reconnectionDelay: 2000
+      reconnectionDelay: 1500,
     });
 
-    this.socket.on('connect', () => {
-      console.log('🟢 Socket connected');
+    this.socket.on('connect_error', (error) => {
+      this.showToast('Connection error', error.message || 'Could not connect to server.', 'error');
     });
 
-    this.socket.on('connect_error', err => {
-      console.error('Socket error:', err.message);
-      this.showToast('Connection Error', 'Could not connect to server.', 'error');
-    });
-
-    this.socket.on('disconnect', () => {
-      console.log('🔴 Socket disconnected');
-    });
-
-    // FIXED: server emits 'call_invite' to the recipient (not
-    // 'incoming_call_signal'), with payload { from, callType, roomURL, roomName }.
-    this.socket.on('call_invite', ({ from, callType, roomURL, roomName }) => {
-      const accept = confirm(`Incoming ${callType} call from ${from}. Accept?`);
-      if (accept) {
-        this.activeCallRoom = { roomName, with: from };
-        this.socket.emit('call_accept', { to: from, roomURL, roomName });
-        this.joinCallRoom(roomURL);
-      } else {
-        this.socket.emit('call_reject', { to: from });
-      }
-    });
-
-    this.socket.on('call_accepted', ({ from, roomURL }) => {
-      this.showToast('Call accepted', `${from} joined the call.`, 'message');
-      // Caller's own window was already opened in initiateCall(); nothing
-      // further to do here besides surfacing the toast. roomURL is
-      // available if you want to re-focus/re-open it.
-      void roomURL;
-    });
-
-    this.socket.on('call_rejected', ({ from }) => {
-      this.showToast('Call declined', `${from} declined the call.`, 'error');
-      this.activeCallRoom = null;
-    });
-
-    this.socket.on('call_failed', ({ reason }) => {
-      this.showToast('Call failed', reason || 'Could not reach that user.', 'error');
-      this.activeCallRoom = null;
-    });
-
-    this.socket.on('call_ended', ({ from }) => {
-      this.showToast('Call ended', `${from} ended the call.`, 'message');
-      this.activeCallRoom = null;
-    });
-
-    this.socket.on('online_users', users => {
+    this.socket.on('online_users', (users) => {
       this.onlineSet = new Set(users);
       this.refreshOnlineStatus();
     });
@@ -333,114 +370,91 @@ class ZapChat {
       else this.onlineSet.delete(username);
       this.refreshOnlineStatus();
       if (username === this.activeChat) {
-        this.domCache.chatStatus.textContent = online ? '🟢 Online' : '🔒 Encrypted';
+        this.dom.chatStatus.textContent = online ? '🟢 Online' : '🔒 Encrypted';
       }
     });
 
-    this.socket.on('private_message', (msg) => {
-      this.receiveMessage(msg);
-    });
+    this.socket.on('private_message', (message) => this.receiveMessage(message));
+    this.socket.on('message_sent', (message) => this.onMessageSent(message));
+    this.socket.on('typing_start', ({ from }) => this.onTypingStart(from));
+    this.socket.on('typing_stop', ({ from }) => this.onTypingStop(from));
+    this.socket.on('messages_read', ({ by }) => this.onMessagesRead(by));
 
-    this.socket.on('message_sent', (msg) => {
-      this.onMessageSent(msg);
-    });
-
-    this.socket.on('typing_start', ({ from }) => {
-      this.ensureChat(from);
-      this.chats.get(from).typing = true;
-      this.updateChatListItem(from);
-      if (this.activeChat === from) this.showTypingIndicator();
-    });
-
-    this.socket.on('typing_stop', ({ from }) => {
-      if (this.chats.has(from)) this.chats.get(from).typing = false;
-      this.updateChatListItem(from);
-      if (this.activeChat === from) this.removeTypingIndicator();
-    });
-
-    this.socket.on('messages_read', ({ by }) => {
-      if (this.chats.has(by)) {
-        const msgs = this.chats.get(by).messages;
-        for (let i = 0; i < msgs.length; i++) {
-          if (msgs[i].from === this.user.username) msgs[i].status = 'read';
-        }
-        if (this.activeChat === by) this.updateReadStatuses();
+    this.socket.on('call_invite', ({ from, callType, roomURL, roomName }) => {
+      const accept = confirm(`Incoming ${callType} call from ${from}. Accept?`);
+      if (accept) {
+        this.callRoom = { roomName, with: from, url: roomURL };
+        this.socket.emit('call_accept', { to: from, roomURL, roomName });
+        window.open(roomURL, 'ZapChat Call', 'width=1000,height=720');
+      } else {
+        this.socket.emit('call_reject', { to: from });
       }
     });
+
+    this.socket.on('call_accepted', ({ from }) => this.showToast('Call accepted', `${from} joined the call.`));
+    this.socket.on('call_rejected', ({ from }) => this.showToast('Call declined', `${from} declined the call.`, 'error'));
+    this.socket.on('call_failed', ({ reason }) => this.showToast('Call failed', reason || 'Could not reach that user.', 'error'));
+    this.socket.on('call_ended', ({ from }) => this.showToast('Call ended', `${from} ended the call.`));
   }
 
-  // ─── USERS / CONTACTS ────────────────────────────────────────────────────
   async fetchUsers() {
     try {
-      const res = await fetch(`${API}/api/users`, {
-        headers: { Authorization: `Bearer ${this.token}` }
+      const res = await fetch(`${this.api}/api/users`, {
+        credentials: 'include',
       });
+      if (!res.ok) return;
       const users = await res.json();
       this.renderContacts(users);
-    } catch (err) {
-      console.error('Failed to fetch contacts:', err);
+    } catch {
+      this.showToast('Contacts unavailable', 'Could not load users.', 'error');
     }
   }
 
   renderContacts(users) {
-    const list = this.domCache.usersList;
-    const fragment = document.createDocumentFragment();
+    const list = this.dom.usersList;
     list.innerHTML = '';
-
-    if (!users.length) {
+    if (!users?.length) {
       list.innerHTML = '<div class="empty-state"><i class="fas fa-user-slash"></i><p>No other users yet.</p></div>';
       return;
     }
-
-    users.forEach(u => {
-      if (this.onlineSet.has(u.username)) u.online = true;
-      fragment.appendChild(this.createContactEl(u, false));
-    });
-
+    const fragment = document.createDocumentFragment();
+    users.forEach((user) => fragment.appendChild(this.createContactEl(user)));
     list.appendChild(fragment);
   }
 
-  createContactEl(user, isChatItem = false) {
-    const div = document.createElement('div');
-    div.className = 'contact-item';
-    div.dataset.username = user.username;
-
-    const isOnline = this.onlineSet.has(user.username);
-    const chatData = this.chats.get(user.username);
-    const lastMsg  = chatData?.lastMsg || user.status || 'Start a conversation';
-    const lastTime = chatData?.lastTime || '';
-    const unread   = chatData?.unread || 0;
-    const typing   = chatData?.typing || false;
-
-    div.innerHTML = `
-      <div class="c-avatar ${isOnline ? 'online' : ''}">${user.username.charAt(0).toUpperCase()}</div>
+  createContactEl(user) {
+    const chat = this.chats.get(user.username) || {};
+    const item = document.createElement('div');
+    item.className = 'contact-item';
+    item.dataset.username = user.username;
+    item.innerHTML = `
+      <div class="c-avatar ${user.online ? 'online' : ''}">${(user.avatar || user.username.charAt(0)).charAt(0).toUpperCase()}</div>
       <div class="c-info">
-        <div class="c-name">${user.username}</div>
-        <div class="c-last ${typing ? 'typing' : ''}">${typing ? '✍️ typing…' : this.escHtml(lastMsg)}</div>
+        <div class="c-name">${this.escHtml(user.displayName || user.username)}</div>
+        <div class="c-last ${chat.typing ? 'typing' : ''}">${chat.typing ? '✍️ typing…' : this.escHtml(chat.lastMsg || user.status || 'Start a conversation')}</div>
       </div>
       <div class="c-meta">
-        <div class="c-time">${lastTime ? this.formatTime(lastTime) : ''}</div>
-        ${unread ? `<div class="c-badge">${unread > 9 ? '9+' : unread}</div>` : ''}
+        <div class="c-time">${chat.lastTime ? this.formatTime(chat.lastTime) : ''}</div>
+        ${chat.unread ? `<div class="c-badge">${chat.unread > 9 ? '9+' : chat.unread}</div>` : ''}
       </div>
     `;
-    div.addEventListener('click', () => this.openChat(user.username));
-    return div;
+    item.addEventListener('click', () => this.openChat(user.username));
+    return item;
   }
 
   refreshOnlineStatus() {
-    const items = this.domCache.usersList.getElementsByClassName('contact-item');
-    for (let i = 0; i < items.length; i++) {
-      const un = items[i].dataset.username;
-      const avatar = items[i].querySelector('.c-avatar');
-      if (avatar) avatar.classList.toggle('online', this.onlineSet.has(un));
-    }
+    document.querySelectorAll('.contact-item').forEach((item) => {
+      const username = item.dataset.username;
+      const avatar = item.querySelector('.c-avatar');
+      if (avatar) avatar.classList.toggle('online', this.onlineSet.has(username));
+    });
   }
 
-  filterContacts(q) {
-    const searchString = q.toLowerCase();
-    document.querySelectorAll('.contact-item').forEach(el => {
-      const name = el.dataset.username?.toLowerCase() || '';
-      el.style.display = name.includes(searchString) ? '' : 'none';
+  filterContacts(query) {
+    const term = query.toLowerCase();
+    document.querySelectorAll('.contact-item').forEach((item) => {
+      const username = item.dataset.username.toLowerCase();
+      item.style.display = username.includes(term) ? '' : 'none';
     });
   }
 
@@ -450,55 +464,41 @@ class ZapChat {
     }
   }
 
-  // ─── OPEN / CLOSE CHAT ───────────────────────────────────────────────────
   async openChat(username) {
     if (this.activeChat === username) return;
-
     this.activeChat = username;
     this.ensureChat(username);
-
     this.chats.get(username).unread = 0;
-    this.socket.emit('mark_read', { from: username });
+    this.socket?.emit('mark_read', { from: username });
 
-    document.getElementById('chat-name').textContent = username;
-    document.getElementById('chat-avatar').textContent = username.charAt(0).toUpperCase();
-    this.domCache.chatStatus.textContent = this.onlineSet.has(username) ? '🟢 Online' : '🔒 Encrypted';
-
-    document.getElementById('chat-empty').classList.add('hidden');
-    document.getElementById('active-chat').classList.remove('hidden');
-
+    this.dom.chatName.textContent = username;
+    this.dom.chatAvatar.textContent = username.charAt(0).toUpperCase();
+    this.dom.chatStatus.textContent = this.onlineSet.has(username) ? '🟢 Online' : '🔒 Encrypted';
+    this.dom.chatEmpty.classList.add('hidden');
+    this.dom.activeChat.classList.remove('hidden');
     document.querySelector('.chat-panel').classList.add('visible');
     document.querySelector('.sidebar').classList.add('hidden-mobile');
+    document.querySelectorAll('.contact-item').forEach((item) => item.classList.toggle('active', item.dataset.username === username));
 
-    document.querySelectorAll('.contact-item').forEach(el => {
-      el.classList.toggle('active', el.dataset.username === username);
-    });
-
-    const msgArea = this.domCache.messagesArea;
-    msgArea.innerHTML = '<div class="messages-date-divider"><span>Today</span></div>';
+    this.dom.messagesArea.innerHTML = '<div class="messages-date-divider"><span>Today</span></div>';
 
     try {
-      const res = await fetch(`${API}/api/messages/${username}`, {
-        headers: { Authorization: `Bearer ${this.token}` }
-      });
+      const res = await fetch(`${this.api}/api/messages/${encodeURIComponent(username)}`, { credentials: 'include' });
       const history = await res.json();
       this.chats.get(username).messages = history;
-
       const fragment = document.createDocumentFragment();
-      history.forEach(m => this.renderMessage(m, fragment));
-      msgArea.appendChild(fragment);
+      history.forEach((message) => this.renderMessage(message, fragment));
+      this.dom.messagesArea.appendChild(fragment);
     } catch {
       const fragment = document.createDocumentFragment();
-      this.chats.get(username).messages.forEach(m => this.renderMessage(m, fragment));
-      msgArea.appendChild(fragment);
+      this.chats.get(username).messages.forEach((message) => this.renderMessage(message, fragment));
+      this.dom.messagesArea.appendChild(fragment);
     }
 
     this.scrollBottom();
-    this.domCache.messageInput.focus();
-
+    this.dom.messageInput.focus();
     this.removeTypingIndicator();
     if (this.chats.get(username).typing) this.showTypingIndicator();
-
     this.updateChatListItem(username);
   }
 
@@ -508,120 +508,116 @@ class ZapChat {
     this.activeChat = null;
   }
 
-  // ─── MESSAGES ────────────────────────────────────────────────────────────
   sendMessage() {
-    const input = this.domCache.messageInput;
-    const text = input.value.trim();
+    const text = this.dom.messageInput.value.trim();
     if (!text || !this.activeChat) return;
-
-    this.socket.emit('private_message', { to: this.activeChat, text });
-    input.value = '';
-    input.style.height = 'auto';
-
+    this.socket?.emit('private_message', { to: this.activeChat, text });
+    this.dom.messageInput.value = '';
+    this.dom.messageInput.style.height = 'auto';
     this.stopTyping();
   }
 
-  onMessageSent(msg) {
-    this.ensureChat(msg.to);
-    const chat = this.chats.get(msg.to);
-    msg.status = 'sent';
-    chat.messages.push(msg);
-    chat.lastMsg  = msg.text;
-    chat.lastTime = msg.timestamp;
-
-    if (this.activeChat === msg.to) {
-      this.renderMessage(msg, this.domCache.messagesArea);
+  onMessageSent(message) {
+    const chat = this.chats.get(message.to);
+    if (!chat) return;
+    message.status = 'sent';
+    chat.messages.push(message);
+    chat.lastMsg = message.text;
+    chat.lastTime = message.timestamp;
+    if (this.activeChat === message.to) {
+      this.renderMessage(message, this.dom.messagesArea);
       this.scrollBottom();
     }
-    this.updateChatListItem(msg.to);
+    this.updateChatListItem(message.to);
   }
 
-  receiveMessage(msg) {
-    this.ensureChat(msg.from);
-    const chat = this.chats.get(msg.from);
-    msg.status = 'received';
-    chat.messages.push(msg);
-    chat.lastMsg  = msg.text;
-    chat.lastTime = msg.timestamp;
-
-    if (this.activeChat === msg.from) {
+  receiveMessage(message) {
+    this.ensureChat(message.from);
+    const chat = this.chats.get(message.from);
+    message.status = 'received';
+    chat.messages.push(message);
+    chat.lastMsg = message.text;
+    chat.lastTime = message.timestamp;
+    if (this.activeChat === message.from) {
       this.removeTypingIndicator();
-      this.renderMessage(msg, this.domCache.messagesArea);
+      this.renderMessage(message, this.dom.messagesArea);
       this.scrollBottom();
-      this.socket.emit('mark_read', { from: msg.from });
+      this.socket?.emit('mark_read', { from: message.from });
     } else {
-      chat.unread = (chat.unread || 0) + 1;
-      this.showToast(msg.from, msg.text);
+      chat.unread += 1;
+      this.showToast(message.from, message.text);
     }
-
-    this.updateChatListItem(msg.from);
+    this.updateChatListItem(message.from);
   }
 
-  renderMessage(msg, targetContainer) {
-    const isSent = msg.from === this.user.username;
+  renderMessage(message, target) {
+    const sent = message.from === this.user.username;
     const row = document.createElement('div');
-    row.className = `msg-row ${isSent ? 'sent' : 'received'}`;
-    row.dataset.id = msg.id;
-
-    const statusIcon = isSent
-      ? `<span class="msg-status ${msg.status || 'sent'}">
-           ${msg.status === 'read' ? '✓✓' : '✓'}
-         </span>`
-      : '';
-
+    row.className = `msg-row ${sent ? 'sent' : 'received'}`;
+    row.dataset.id = message.id;
+    const status = sent ? `<span class="msg-status ${message.status || 'sent'}">${message.status === 'read' ? '✓✓' : '✓'}</span>` : '';
     row.innerHTML = `
       <div class="msg-bubble">
-        <div class="msg-text">${this.escHtml(msg.text)}</div>
+        <div class="msg-text">${this.escHtml(message.text)}</div>
         <div class="msg-meta">
-          <span class="msg-time">${this.formatTime(msg.timestamp)}</span>
-          ${statusIcon}
+          <span class="msg-time">${this.formatTime(message.timestamp)}</span>
+          ${status}
         </div>
       </div>
     `;
-    targetContainer.appendChild(row);
+    target.appendChild(row);
   }
 
-  updateReadStatuses() {
-    this.domCache.messagesArea.querySelectorAll('.msg-row.sent .msg-status').forEach(el => {
-      el.className = 'msg-status read';
-      el.textContent = '✓✓';
+  onTypingStart(from) {
+    this.ensureChat(from);
+    this.chats.get(from).typing = true;
+    this.updateChatListItem(from);
+    if (this.activeChat === from) this.showTypingIndicator();
+  }
+
+  onTypingStop(from) {
+    if (this.chats.has(from)) this.chats.get(from).typing = false;
+    this.updateChatListItem(from);
+    if (this.activeChat === from) this.removeTypingIndicator();
+  }
+
+  onMessagesRead(by) {
+    if (!this.chats.has(by)) return;
+    const messages = this.chats.get(by).messages;
+    messages.forEach((message) => {
+      if (message.from === this.user.username) message.status = 'read';
     });
+    if (this.activeChat === by) this.updateReadStatuses();
   }
 
-  // ─── TYPING ──────────────────────────────────────────────────────────────
   onInputChange() {
-    const input = this.domCache.messageInput;
+    const input = this.dom.messageInput;
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-
     if (!this.activeChat) return;
     if (!this.isTyping) {
       this.isTyping = true;
-      this.socket.emit('typing_start', { to: this.activeChat });
+      this.socket?.emit('typing_start', { to: this.activeChat });
     }
     clearTimeout(this.typingTimer);
     this.typingTimer = setTimeout(() => this.stopTyping(), 2000);
   }
 
   stopTyping() {
-    // FIXED: this previously re-emitted 'typing_start' right before
-    // 'typing_stop', which would re-trigger the typing indicator on the
-    // recipient's screen for a moment every time you stopped typing or hit
-    // send. It should only ever emit 'typing_stop'.
     if (this.isTyping && this.activeChat) {
       this.isTyping = false;
-      this.socket.emit('typing_stop', { to: this.activeChat });
+      this.socket?.emit('typing_stop', { to: this.activeChat });
     }
     clearTimeout(this.typingTimer);
   }
 
   showTypingIndicator() {
     if (document.getElementById('typing-indicator')) return;
-    const row  = document.createElement('div');
+    const row = document.createElement('div');
     row.className = 'msg-row received typing-indicator';
     row.id = 'typing-indicator';
-    row.innerHTML = `<div class="msg-bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>`;
-    this.domCache.messagesArea.appendChild(row);
+    row.innerHTML = '<div class="msg-bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>';
+    this.dom.messagesArea.appendChild(row);
     this.scrollBottom();
   }
 
@@ -629,119 +625,140 @@ class ZapChat {
     document.getElementById('typing-indicator')?.remove();
   }
 
-  // ─── CHAT LIST MANAGEMENT ─────────────────────────────────────────────────
+  updateReadStatuses() {
+    this.dom.messagesArea.querySelectorAll('.msg-row.sent .msg-status').forEach((node) => {
+      node.className = 'msg-status read';
+      node.textContent = '✓✓';
+    });
+  }
+
   updateChatListItem(username) {
     const chat = this.chats.get(username);
-    const isOnline = this.onlineSet.has(username);
-
-    const containers = [this.domCache.chatsSection, document.getElementById('contacts-section')];
-
-    containers.forEach(container => {
-      if (!container) return;
-      const item = container.querySelector(`.contact-item[data-username="${username}"]`);
-      if (item) {
-        const avatar = item.querySelector('.c-avatar');
-        if (avatar) avatar.className = `c-avatar ${isOnline ? 'online' : ''}`;
-
-        const lastEl = item.querySelector('.c-last');
-        if (lastEl) {
-          lastEl.className = `c-last ${chat?.typing ? 'typing' : ''}`;
-          lastEl.textContent = chat?.typing ? '✍️ typing…' : (chat?.lastMsg || 'Start a conversation');
-        }
-
-        const timeEl = item.querySelector('.c-time');
-        if (timeEl) timeEl.textContent = chat?.lastTime ? this.formatTime(chat.lastTime) : '';
-
-        const badge = item.querySelector('.c-badge');
-        if (badge) badge.remove();
-        if (chat?.unread) {
-          const b = document.createElement('div');
-          b.className = 'c-badge';
-          b.textContent = chat.unread > 9 ? '9+' : chat.unread;
-          item.querySelector('.c-meta')?.appendChild(b);
-        }
+    document.querySelectorAll(`.contact-item[data-username="${username}"]`).forEach((item) => {
+      const avatar = item.querySelector('.c-avatar');
+      const last = item.querySelector('.c-last');
+      const time = item.querySelector('.c-time');
+      const meta = item.querySelector('.c-meta');
+      if (avatar) avatar.className = `c-avatar ${this.onlineSet.has(username) ? 'online' : ''}`;
+      if (last) {
+        last.className = `c-last ${chat?.typing ? 'typing' : ''}`;
+        last.textContent = chat?.typing ? '✍️ typing…' : (chat?.lastMsg || 'Start a conversation');
+      }
+      if (time) time.textContent = chat?.lastTime ? this.formatTime(chat.lastTime) : '';
+      const badge = item.querySelector('.c-badge');
+      if (badge) badge.remove();
+      if (chat?.unread) {
+        const node = document.createElement('div');
+        node.className = 'c-badge';
+        node.textContent = chat.unread > 9 ? '9+' : chat.unread;
+        meta?.appendChild(node);
       }
     });
 
-    this.upsertChatsSection(username);
-  }
-
-  upsertChatsSection(username) {
-    const section = this.domCache.chatsSection;
-    const emptyState = section.querySelector('.empty-state');
-    if (emptyState) emptyState.remove();
-
-    const existingEntry = section.querySelector(`.contact-item[data-username="${username}"]`);
-
-    if (existingEntry) {
-      if (section.firstChild === existingEntry) return;
-      existingEntry.remove();
+    const section = this.dom.chatsSection;
+    const empty = section.querySelector('.empty-state');
+    if (empty) empty.remove();
+    const existing = section.querySelector(`.contact-item[data-username="${username}"]`);
+    if (existing) {
+      if (section.firstChild !== existing) existing.remove();
+      else return;
     }
-
-    const el = this.createContactEl({ username }, true);
+    const el = this.createContactEl({ username, avatar: username.charAt(0), status: '' });
     section.insertBefore(el, section.firstChild);
   }
 
-  // ─── EMOJI ───────────────────────────────────────────────────────────────
   buildEmojiPicker() {
-    const picker = this.domCache.emojiPicker;
     const fragment = document.createDocumentFragment();
-
-    EMOJIS.forEach(em => {
-      const btn = document.createElement('span');
-      btn.className = 'emoji-btn-item';
-      btn.textContent = em;
-      btn.addEventListener('click', e => {
-        e.stopPropagation();
-        const input = this.domCache.messageInput;
-        input.value += em;
-        input.focus();
-        picker.classList.add('hidden');
+    EMOJIS.forEach((emoji) => {
+      const item = document.createElement('span');
+      item.className = 'emoji-btn-item';
+      item.textContent = emoji;
+      item.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.dom.messageInput.value += emoji;
+        this.dom.messageInput.focus();
+        this.dom.emojiPicker.classList.add('hidden');
       });
-      fragment.appendChild(btn);
+      fragment.appendChild(item);
     });
-    picker.appendChild(fragment);
+    this.dom.emojiPicker.appendChild(fragment);
   }
 
-  // ─── TOASTS ──────────────────────────────────────────────────────────────
-  showToast(title, body, type = 'message') {
-    const container = document.querySelector('.toast-container');
-    if (!container) return;
+  async initiateCall(callType) {
+    if (!this.activeChat) return;
+    if (!this.onlineSet.has(this.activeChat)) {
+      this.showToast('Cannot call', `${this.activeChat} is offline.`, 'error');
+      return;
+    }
 
+    try {
+      const res = await fetch(`${this.api}/api/create-room`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ with: this.activeChat, privacy: 'private' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not create call room.');
+
+      this.callRoom = { roomName: data.roomName, with: this.activeChat, url: data.publicURL };
+      this.socket?.emit('call_invite', {
+        to: this.activeChat,
+        callType,
+        roomURL: data.publicURL,
+        roomName: data.roomName,
+      });
+      window.open(data.publicURL, 'ZapChat Call', 'width=1000,height=720');
+    } catch (error) {
+      this.showToast('Call error', error.message || 'Could not connect to call services.', 'error');
+    }
+  }
+
+  endCall() {
+    if (!this.callRoom?.with) return;
+    this.socket?.emit('call_end', { to: this.callRoom.with });
+    this.callRoom = null;
+  }
+
+  showToast(title, body, type = 'message') {
+    let container = document.querySelector('.toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.className = 'toast-container';
+      document.body.appendChild(container);
+    }
     const toast = document.createElement('div');
     toast.className = 'toast';
     if (type === 'error') toast.style.borderLeftColor = 'var(--danger)';
-
-    toast.innerHTML = `<div class="toast-title">${this.escHtml(title)}</div><div class="toast-body">${this.escHtml(body.substring(0, 60))}</div>`;
+    toast.innerHTML = `<div class="toast-title">${this.escHtml(title)}</div><div class="toast-body">${this.escHtml(String(body).slice(0, 80))}</div>`;
     container.appendChild(toast);
     setTimeout(() => toast.remove(), 4200);
   }
 
-  // ─── UTILS ───────────────────────────────────────────────────────────────
   scrollBottom() {
-    const area = this.domCache.messagesArea;
-    requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
+    requestAnimationFrame(() => {
+      this.dom.messagesArea.scrollTop = this.dom.messagesArea.scrollHeight;
+    });
   }
 
-  formatTime(iso) {
-    const d = new Date(iso);
+  formatTime(value) {
+    const date = new Date(value);
     const now = new Date();
-    if (d.toDateString() === now.toDateString()) {
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (date.toDateString() === now.toDateString()) {
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
-    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
 
-  escHtml(str) {
-    return String(str)
-      .replace(/&/g,'&amp;')
-      .replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;')
-      .replace(/"/g,'&quot;');
+  escHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 }
 
-// Init
 window.addEventListener('DOMContentLoaded', () => {
   window.app = new ZapChat();
 });
