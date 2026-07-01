@@ -15,11 +15,35 @@ services:
         value: 10000
         generateValue: false
       - key: CLIENT_URL
-        value: "*"
+        value: "https://your-cloudflare-pages-domain.pages.dev"
+      - key: BACKEND_URL
+        value: "https://your-render-service.onrender.com"
       - key: JWT_SECRET
         generateValue: true
         sync: false
-      - key: MONGODB_URI
+      - key: MONGO_URI
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_SECURE
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: METERED_APP_DOMAIN
+        sync: false
+      - key: METERED_SECRET_KEY
         sync: false
     buildFilters:
       - "!**/.env"
