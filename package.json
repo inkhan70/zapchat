@@ -7,8 +7,10 @@
   },
   "scripts": {
     "install:all": "cd server && npm install",
-    "start": "cd server && node index.js",
-    "dev": "cd server && npx nodemon index.js"
+    "start": "cd server && npm start",
+    "dev": "cd server && npm run dev",
+    "build": "cd server && npm run build",
+    "test": "cd server && npm test"
   },
   "keywords": ["chat", "socket.io", "real-time", "websocket", "whatsapp-clone"],
   "author": "",
