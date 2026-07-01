@@ -31,6 +31,17 @@ function serializeCookie(name, value, options = {}) {
   return parts.join('; ');
 }
 
+function appendCookieHeader(res, cookie) {
+  const existing = res.getHeader('Set-Cookie');
+  if (!existing) {
+    res.setHeader('Set-Cookie', cookie);
+    return;
+  }
+
+  const next = Array.isArray(existing) ? existing.concat(cookie) : [existing, cookie];
+  res.setHeader('Set-Cookie', next);
+}
+
 function parseCookies(header = '') {
   return header.split(';').reduce((acc, pair) => {
     const idx = pair.indexOf('=');
@@ -59,12 +70,12 @@ function signSession(user) {
 }
 
 function setSessionCookie(res, token) {
-  res.setHeader('Set-Cookie', serializeCookie(COOKIE_NAME, token, getCookieOptions()));
+  appendCookieHeader(res, serializeCookie(COOKIE_NAME, token, getCookieOptions()));
 }
 
 function clearSessionCookie(res) {
-  res.setHeader(
-    'Set-Cookie',
+  appendCookieHeader(
+    res,
     serializeCookie(COOKIE_NAME, '', { ...getCookieOptions(0), maxAge: 0 })
   );
 }
@@ -125,6 +136,7 @@ function makeSlug(value) {
 
 module.exports = {
   COOKIE_NAME,
+  appendCookieHeader,
   clearSessionCookie,
   createResetToken,
   getCookieOptions,
