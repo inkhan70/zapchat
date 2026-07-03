@@ -231,6 +231,47 @@ body {
   transform: translateY(-1px);
 }
 
+/* ✅ NEW: Google OAuth Layout Elements */
+.oauth-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  margin: 16px 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.oauth-divider::before, 
+.oauth-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px solid var(--border);
+}
+
+.oauth-divider:not(:empty)::before { margin-right: .5em; }
+.oauth-divider:not(:empty)::after { margin-left: .5em; }
+
+.google-btn {
+  background: #ffffff !important;
+  color: #111111 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+}
+
+.google-btn:hover {
+  background: #f1f1f1 !important;
+  transform: translateY(-1px);
+}
+
+.google-btn i {
+  color: #ea4335;
+  font-size: 16px;
+}
+
 /* ─── APP LAYOUT ───────────────────────────────────────────────────────── */
 .app {
   display: flex;
