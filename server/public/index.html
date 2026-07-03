@@ -9,7 +9,6 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
   <link rel="stylesheet" href="style.css" />
 
-  <!-- Critical fix styles - ensure auth is visible and app/call is hidden on boot -->
   <style>
     /* Force auth screen to be visible initially */
     #auth-screen {
@@ -27,15 +26,63 @@
     #call-modal .call-stage {
         display: none !important;
     }
+
+    /* Style adjustments for Google OAuth Action Buttons */
+    .oauth-divider {
+      display: flex;
+      align-items: center;
+      text-align: center;
+      margin: 16px 0;
+      color: var(--text-muted, #888);
+      font-size: 0.85rem;
+    }
+    .oauth-divider::before, .oauth-divider::after {
+      content: '';
+      flex: 1;
+      border-bottom: 1px solid var(--border-color, #333);
+    }
+    .oauth-divider:not(:empty)::before { margin-right: .5em; }
+    .oauth-divider:not(:empty)::after { margin-left: .5em; }
+
+    .google-btn {
+      background: #fff !important;
+      color: #111 !important;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      font-weight: 500;
+    }
+    .google-btn i {
+      color: #ea4335;
+    }
   </style>
 
-  <!-- Metered Video SDK — exposes the global `Metered` namespace.
-       Used via `new Metered.Meeting()` in app.js. -->
+  <script>
+    (function() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const token = urlParams.get('token');
+      const userStr = urlParams.get('user');
+
+      if (token && userStr) {
+        try {
+          // Mount session variables seamlessly directly into local storage mechanisms
+          localStorage.setItem('zapchat_token', token);
+          localStorage.setItem('zapchat_user', decodeURIComponent(userStr));
+          
+          // Clear address bar query pollution immediately for clean system routing profiles
+          window.history.replaceState({}, document.title, window.location.pathname);
+        } catch (e) {
+          console.error("Failed to parse Google OAuth runtime parameters", e);
+        }
+      }
+    })();
+  </script>
+
   <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
 </head>
 <body>
 
-<!-- ═══════════════════ AUTH SCREEN ═══════════════════ -->
 <div id="auth-screen" class="auth-screen">
   <div class="auth-bg">
     <div class="auth-blob b1"></div>
@@ -68,6 +115,14 @@
       <button id="login-btn" class="auth-btn">
         <span>Sign In</span><i class="fas fa-arrow-right"></i>
       </button>
+
+      <div class="oauth-divider">or</div>
+      <a href="https://zapchat-production.up.railway.app/api/auth/google" style="text-decoration: none; width: 100%;">
+        <button type="button" class="auth-btn google-btn">
+          <i class="fab fa-google"></i>
+          <span>Continue with Google</span>
+        </button>
+      </a>
     </div>
 
     <div id="register-panel" class="auth-panel">
@@ -87,10 +142,8 @@
   </div>
 </div>
 
-<!-- ═══════════════════ MAIN APP ═══════════════════ -->
 <div id="app" class="app hidden">
 
-  <!-- SIDEBAR -->
   <aside class="sidebar">
     <div class="sidebar-header">
       <div class="me-avatar" id="me-avatar"></div>
@@ -130,10 +183,8 @@
     </div>
   </aside>
 
-  <!-- CHAT PANEL -->
   <main class="chat-panel">
 
-    <!-- EMPTY STATE -->
     <div id="chat-empty" class="chat-empty">
       <div class="chat-empty-icon"><i class="fas fa-bolt"></i></div>
       <h2>Welcome to ZapChat</h2>
@@ -143,7 +194,6 @@
       </div>
     </div>
 
-    <!-- ACTIVE CHAT -->
     <div id="active-chat" class="active-chat hidden">
       <div class="chat-topbar">
         <button class="back-btn icon-btn" id="back-btn"><i class="fas fa-arrow-left"></i></button>
@@ -182,7 +232,6 @@
   </main>
 </div>
 
-<!-- ═══════════════════ VIDEO / VOICE CALL MODAL ═══════════════════ -->
 <div id="call-modal" class="call-modal hidden" aria-hidden="true">
   <div class="call-modal-backdrop"></div>
 
