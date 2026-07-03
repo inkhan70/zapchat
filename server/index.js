@@ -1,12 +1,12 @@
 require('dotenv').config();
 const express    = require('express');
-const http      = require('http');
+const http       = require('http');
 const { Server } = require('socket.io');
-const cors      = require('cors');
-const bcrypt    = require('bcryptjs');
-const jwt       = require('jsonwebtoken');
+const cors       = require('cors');
+const bcrypt     = require('bcryptjs');
+const jwt        = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const path      = require('path');
+const path       = require('path');
 const mongoose  = require('mongoose');
 
 // ─── Environment ─────────────────────────────────────────────────────────────
@@ -14,50 +14,40 @@ const JWT_SECRET   = process.env.JWT_SECRET   || 'zapchat_super_secret_key_2024'
 const PORT         = process.env.PORT         || 5000;
 const MONGODB_URI  = process.env.MONGODB_URI;
 
+// Google OAuth Environment Configurations
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zapchat-5ru.pages.dev';
+const GOOGLE_CALLBACK_URL = 'https://zapchat-production.up.railway.app/api/auth/google/callback';
+
 // ✅ FIXED: Updated configuration names to fully match your Vercel panel settings
 const METERED_APP_DOMAIN = process.env.METERED_DOMAIN || process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live';
 const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY;
 const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 
-// Explicit allowed-origin list. Vercel-hosted frontend domains are also
-// derived from the VERCEL_FRONTEND_ORIGINS env var (comma-separated) so
-// you can add a new preview domain without redeploying the backend.
+// Explicit allowed-origin list. Whitelisted Cloudflare Pages URL
 const ALLOWED_ORIGINS = [
-  // Stable Vercel production domains
+  'https://zapchat-5ru.pages.dev', // Added Cloudflare production domain
   'https://zapchat-server.vercel.app',
   'https://zapchat-server-inkhan.vercel.app',
   'https://inkhan70-zapchat.vercel.app',
-  // Vercel preview deployments follow the pattern
-  //   <project>-<scope>-<user-hash>.vercel.app
-  // — those are auto-allowed below when VERCEL_FRONTEND_ORIGINS is set.
-  // Local dev
   'http://localhost:3000',
   'http://localhost:5000',
   'http://127.0.0.1:5000',
-  // Fallback legacy Back4app self-origin (in case the browser hits us directly)
   'https://echochat-fvq5kwvs.b4a.run',
   'https://echochat-wf63zbz0.b4a.run',
   'https://echochat-pjabun7d.b4a.run',
-  // Back4app self-origin (the backend's own URL) so the Vercel proxy's
-  // forwarded Origin doesn't get rejected when the URL rotates.
   ...(process.env.BACKEND_URL ? [process.env.BACKEND_URL.replace(/\/$/, '')] : []),
 ];
 
-// Pull in any extra frontend origins from env (comma-separated). Lets
-// you whitelist new Vercel preview URLs without touching this file.
 if (process.env.VERCEL_FRONTEND_ORIGINS) {
   for (const o of process.env.VERCEL_FRONTEND_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)) {
     if (!ALLOWED_ORIGINS.includes(o)) ALLOWED_ORIGINS.push(o);
   }
 }
 
-// Helper to also auto-allow all Vercel preview URLs of THIS project —
-// the slug `inkhan70-zapchat-server-public` is the constant; every
-// preview is `<slug>-<scope>-<hash>.vercel.app` or `<scope>-<slug>-<hash>`.
 const VERCEL_HOST_RE = /^https:\/\/([\w-]+-)?inkhan70-zapchat(-[\w-]+)?\.vercel\.app$/;
-// Origin-validator — returns the origin string if it is allowed, false otherwise.
-// Allows: (a) anything in ALLOWED_ORIGINS, (b) any Vercel preview of this project,
-// (c) same-origin / no-Origin requests.
+
 function corsOriginValidator(origin, callback) {
   if (!origin) return callback(null, true);
   if (ALLOWED_ORIGINS.includes(origin)) return callback(null, origin);
@@ -68,6 +58,9 @@ function corsOriginValidator(origin, callback) {
 // ─── Express App & HTTP Server ───────────────────────────────────────────────
 const app    = express();
 const server = http.createServer(app);
+
+// ✅ CRITICAL FOR RAILWAY: Trust upstream reverse proxy layers for secure headers/cookies
+app.set('trust proxy', 1);
 
 // ─── MongoDB ─────────────────────────────────────────────────────────────────
 let isMongoConnected = false;
@@ -83,7 +76,7 @@ if (MONGODB_URI) {
 
   mongoose.connection.on('disconnected', () => {
     isMongoConnected = false;
-    console.warn('⚠️ MongoDB disconnected — falling back to in-memory storage until reconnected');
+    console.warn('⚠️ MongoDB disconnected — falling back to in-memory storage');
   });
   mongoose.connection.on('reconnected', () => {
     isMongoConnected = true;
@@ -97,7 +90,8 @@ if (MONGODB_URI) {
 const UserSchema = new mongoose.Schema({
   id:           { type: String, required: true, unique: true },
   username:     { type: String, required: true, unique: true, index: true },
-  passwordHash: { type: String, required: true },
+  email:        { type: String, unique: true, sparse: true },
+  passwordHash: { type: String }, // Nullable for Google OAuth accounts
   avatar:       { type: String },
   status:       { type: String, default: 'Hey there! I am using ZapChat.' },
   createdAt:    { type: Date, default: Date.now },
@@ -121,7 +115,7 @@ const MessageModel = mongoose.models.Message || mongoose.model('Message', Messag
 // ─── In-Memory Fallback ──────────────────────────────────────────────────────
 const users       = new Map();
 const messages    = new Map();
-const onlineUsers = new Map();  // username → socket.id
+const onlineUsers = new Map();
 
 // ─── Express Middleware ──────────────────────────────────────────────────────
 app.use(cors({
@@ -133,7 +127,6 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
-// Serve bundled frontend static assets
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -192,15 +185,115 @@ app.post('/api/login', async (req, res) => {
   const dbActive = useDB();
   let user;
   if (dbActive) user = await UserModel.findOne({ username: username.trim() }).lean();
-  else         user = users.get(username.trim());
+  else          user = users.get(username.trim());
 
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  if (!user.passwordHash) return res.status(401).json({ error: 'Account registered via Google login. Use Gmail instead.' });
 
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
   const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar, status: user.status } });
+});
+
+// ─── ✅ NEW: GOOGLE OAUTH FLOW ENDPOINTS ──────────────────────────────────────
+app.get('/api/auth/google', (req, res) => {
+  const rootUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
+  const options = {
+    redirect_uri: GOOGLE_CALLBACK_URL,
+    client_id: GOOGLE_CLIENT_ID,
+    access_type: 'offline',
+    response_type: 'code',
+    prompt: 'consent',
+    scope: [
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'https://www.googleapis.com/auth/userinfo.email',
+    ].join(' '),
+  };
+
+  const qs = new URLSearchParams(options);
+  return res.redirect(`${rootUrl}?${qs.toString()}`);
+});
+
+app.get('/api/auth/google/callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.redirect(`${FRONTEND_URL}?error=oauth_failed`);
+
+  try {
+    // 1. Exchange standard auth code for verification payload token
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: GOOGLE_CALLBACK_URL,
+        grant_type: 'authorization_code',
+      }),
+    });
+
+    const tokens = await tokenRes.json();
+    if (!tokenRes.ok) throw new Error(tokens.error_description || 'Failed to exchange token');
+
+    // 2. Extract specific email identity payload markers
+    const profileRes = await fetch(`https://www.googleapis.com/oauth2/v1/userinfo?alt=json&access_token=${tokens.access_token}`);
+    const profile = await profileRes.json();
+
+    const email = profile.email;
+    let username = email.split('@')[0].replace(/[^a-zA-Z0-9]/g, '');
+    const dbActive = useDB();
+
+    let user = null;
+    if (dbActive) {
+      user = await UserModel.findOne({ email }).lean();
+      if (!user) {
+        // Enforce uniqueness for custom placeholder names
+        const uniqueCheck = await UserModel.findOne({ username }).select('_id').lean();
+        if (uniqueCheck) username += Math.floor(1000 + Math.random() * 9000);
+
+        user = {
+          id: uuidv4(),
+          username,
+          email,
+          avatar: profile.picture || username.charAt(0).toUpperCase(),
+          status: 'Hey there! I am using ZapChat.',
+          createdAt: new Date(),
+        };
+        await UserModel.create(user);
+      }
+    } else {
+      user = Array.from(users.values()).find(u => u.email === email);
+      if (!user) {
+        if (users.has(username)) username += Math.floor(1000 + Math.random() * 9000);
+        user = {
+          id: uuidv4(),
+          username,
+          email,
+          avatar: profile.picture || username.charAt(0).toUpperCase(),
+          status: 'Hey there! I am using ZapChat.',
+          createdAt: new Date(),
+        };
+        users.set(username, user);
+      }
+    }
+
+    // 3. Issue systemic authentication JWT token mapping
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
+    
+    // Redirect cleanly back to the dashboard, passing structural session payloads
+    return res.redirect(`${FRONTEND_URL}?token=${token}&user=${encodeURIComponent(JSON.stringify({
+      id: user.id,
+      username: user.username,
+      avatar: user.avatar,
+      status: user.status
+    }))}`);
+
+  } catch (err) {
+    console.error('❌ Google OAuth processing failure:', err);
+    return res.redirect(`${FRONTEND_URL}?error=server_auth_error`);
+  }
 });
 
 // ─── REST: Users ──────────────────────────────────────────────────────────────
@@ -239,7 +332,7 @@ app.get('/api/messages/:with', async (req, res) => {
   res.json(msgs);
 });
 
-// ─── ✅ NEW REST: Secure TURN Server Credential Proxy ──────────────────────
+// ─── REST: Secure TURN Server Credential Proxy ──────────────────────
 app.get('/api/turn-credentials', async (req, res) => {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
@@ -275,7 +368,7 @@ app.post('/api/create-room', async (req, res) => {
   
   const roomName = (explicit
     || [decoded.username, withUser].filter(Boolean).sort().join('-').toLowerCase()
-                               .replace(/[^a-z0-9-]/g, '-')
+                                   .replace(/[^a-z0-9-]/g, '-')
     || `zc-${decoded.username.toLowerCase()}-${Date.now()}`)
                       .slice(0, 60);
   const privacy = (req.body && req.body.privacy === 'private') ? 'private' : 'public';
@@ -284,7 +377,6 @@ app.post('/api/create-room', async (req, res) => {
     let room = null;
     try {
       const existing = await fetch(
-        // ✅ URL-encode the secret so keys with special chars (+, /, =) don't 401.
         `${METERED_API_BASE}/room/${encodeURIComponent(roomName)}?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`
       );
       if (existing.ok) room = await existing.json();
@@ -292,8 +384,6 @@ app.post('/api/create-room', async (req, res) => {
 
     if (!room) {
       const createRes = await fetch(
-        // ✅ secret key passed as a QUERY PARAM (Metered's REST API requirement)
-        //    and URL-encoded so keys with special characters don't 401.
         `${METERED_API_BASE}/room?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`,
         {
           method:  'POST',
@@ -313,8 +403,6 @@ app.post('/api/create-room', async (req, res) => {
 
       const raw = await createRes.text();
       if (!createRes.ok) {
-        // Parse the body once for the response, but log the WHOLE thing —
-        // never swallow Metered's actual error into a generic message.
         let parsed;
         try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
         const detail = parsed?.message || parsed?.error || raw || createRes.statusText;
@@ -326,12 +414,12 @@ app.post('/api/create-room', async (req, res) => {
           privacy,
           url:       maskedUrl,
           detail,
-          rawBody:   raw.slice(0, 500),  // cap to avoid log spam
+          rawBody:   raw.slice(0, 500),
         });
         return res.status(createRes.status).json({
           error:  'Metered create-room failed',
           detail,
-          domain: METERED_APP_DOMAIN,     // helps you spot a wrong-domain bug
+          domain: METERED_APP_DOMAIN,
         });
       }
       room = JSON.parse(raw);
@@ -341,8 +429,6 @@ app.post('/api/create-room', async (req, res) => {
       roomName:      room.roomName,
       roomId:        room._id,
       privacy:       room.privacy,
-      // roomURL goes to the FRONTEND which feeds it straight into the
-      // Metered JS SDK. The SDK only needs this URL — no publishable key.
       roomURL:       `https://${METERED_APP_DOMAIN}/${room.roomName}`,
       appDomain:     METERED_APP_DOMAIN,
       publicURL:     `https://${METERED_APP_DOMAIN}/${room.roomName}`,
