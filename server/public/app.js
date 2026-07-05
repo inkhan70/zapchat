@@ -128,47 +128,74 @@ class ZapChat {
     this.dom.authTabs?.classList.toggle('hidden', name === 'reset' || name === 'forgot');
   }
 
+  // ✅ FIXED: Extracted Google OAuth tokens arriving from URL parameters cleanly
   async initAuthState() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const oauthToken = urlParams.get('token');
+    const oauthUserData = urlParams.get('user');
+
+    if (oauthToken && oauthUserData) {
+      try {
+        localStorage.setItem('zapchat_token', oauthToken);
+        const parsedUser = JSON.parse(decodeURIComponent(oauthUserData));
+        localStorage.setItem('zapchat_user', JSON.stringify(parsedUser));
+        this.user = parsedUser;
+        
+        // Clear parameters out of the address bar cleanly
+        window.history.replaceState({}, document.title, window.location.pathname);
+        this.enterApp();
+        return;
+      } catch (err) {
+        console.error("Failed processing incoming payload parameters", err);
+      }
+    }
+
+    // Fall back to existing local sessions if available
+    const storedToken = localStorage.getItem('zapchat_token');
+    const storedUser = localStorage.getItem('zapchat_user');
+
+    if (storedToken && storedUser) {
+      try {
+        this.user = JSON.parse(storedUser);
+        this.enterApp();
+        return;
+      } catch (_) {
+        this.logout();
+      }
+    }
+
     if (this.resetToken) {
       this.showAuthPanel('reset');
     } else {
       this.showAuthPanel('login');
     }
-
-    try {
-      const res = await fetch(`${this.api}/api/auth/me`, { credentials: 'include' });
-      if (!res.ok) {
-        return;
-      }
-      const data = await res.json();
-      this.user = data.user;
-      this.enterApp();
-    } catch {
-      // stay on auth screen
-    }
   }
 
+  // ✅ FIXED: Matches Server endpoint route: '/api/login' and saves to localStorage
   async login() {
     this.clearErrors();
-    const identifier = this.dom.loginIdentifier.value.trim();
+    const username = this.dom.loginIdentifier.value.trim();
     const password = this.dom.loginPassword.value;
-    if (!identifier || !password) {
-      this.dom.loginError.textContent = 'Enter your username/email and password.';
+    if (!username || !password) {
+      this.dom.loginError.textContent = 'Enter your username and password.';
       return;
     }
 
     try {
-      const res = await fetch(`${this.api}/api/auth/login`, {
+      const res = await fetch(`${this.api}/api/login`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier, password }),
+        body: JSON.stringify({ username, password }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         this.dom.loginError.textContent = data.error || 'Login failed.';
         return;
       }
+      
+      localStorage.setItem('zapchat_token', data.token);
+      localStorage.setItem('zapchat_user', JSON.stringify(data.user));
       this.user = data.user;
       this.enterApp();
     } catch {
@@ -176,28 +203,31 @@ class ZapChat {
     }
   }
 
+  // ✅ FIXED: Matches Server endpoint route: '/api/register' and saves to localStorage
   async signup() {
     this.clearErrors();
     const username = this.dom.signupUsername.value.trim();
-    const email = this.dom.signupEmail.value.trim();
     const password = this.dom.signupPassword.value;
-    if (!username || !email || !password) {
-      this.dom.signupError.textContent = 'Fill in username, email, and password.';
+    if (!username || !password) {
+      this.dom.signupError.textContent = 'Fill in username and password.';
       return;
     }
 
     try {
-      const res = await fetch(`${this.api}/api/auth/signup`, {
+      const res = await fetch(`${this.api}/api/register`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, email, password }),
+        body: JSON.stringify({ username, password }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         this.dom.signupError.textContent = data.error || 'Signup failed.';
         return;
       }
+
+      localStorage.setItem('zapchat_token', data.token);
+      localStorage.setItem('zapchat_user', JSON.stringify(data.user));
       this.user = data.user;
       this.enterApp();
     } catch {
@@ -257,6 +287,9 @@ class ZapChat {
         return;
       }
       window.history.replaceState({}, document.title, window.location.pathname);
+      
+      localStorage.setItem('zapchat_token', data.token);
+      localStorage.setItem('zapchat_user', JSON.stringify(data.user));
       this.user = data.user;
       this.enterApp();
     } catch {
@@ -268,6 +301,7 @@ class ZapChat {
     window.location.href = `${this.api}/api/auth/google`;
   }
 
+  // ✅ FIXED: Empties localStorage cache blocks thoroughly upon termination
   async logout() {
     try {
       await fetch(`${this.api}/api/auth/logout`, {
@@ -278,6 +312,10 @@ class ZapChat {
       // ignore
     }
     if (this.socket) this.socket.disconnect();
+    
+    localStorage.removeItem('zapchat_token');
+    localStorage.removeItem('zapchat_user');
+    
     this.socket = null;
     this.user = null;
     this.activeChat = null;
@@ -347,13 +385,18 @@ class ZapChat {
     this.dom.callHangupBtn?.addEventListener('click', () => this.endCall());
   }
 
+  // ✅ FIXED: Attaches the required bearer token within socket handshake payload headers
   connectSocket() {
     if (this.socket) this.socket.disconnect();
+    
+    const token = localStorage.getItem('zapchat_token');
+    
     this.socket = io(this.api, {
       withCredentials: true,
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 5,
       reconnectionDelay: 1500,
+      auth: { token }
     });
 
     this.socket.on('connect_error', (error) => {
@@ -397,10 +440,15 @@ class ZapChat {
     this.socket.on('call_ended', ({ from }) => this.showToast('Call ended', `${from} ended the call.`));
   }
 
+  // ✅ FIXED: Added standard Authorization headers across data request calls
   async fetchUsers() {
     try {
+      const token = localStorage.getItem('zapchat_token');
       const res = await fetch(`${this.api}/api/users`, {
         credentials: 'include',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
       if (!res.ok) return;
       const users = await res.json();
@@ -464,6 +512,7 @@ class ZapChat {
     }
   }
 
+  // ✅ FIXED: Transmits Bearer Authentication tokens for historical conversation downloads
   async openChat(username) {
     if (this.activeChat === username) return;
     this.activeChat = username;
@@ -483,7 +532,13 @@ class ZapChat {
     this.dom.messagesArea.innerHTML = '<div class="messages-date-divider"><span>Today</span></div>';
 
     try {
-      const res = await fetch(`${this.api}/api/messages/${encodeURIComponent(username)}`, { credentials: 'include' });
+      const token = localStorage.getItem('zapchat_token');
+      const res = await fetch(`${this.api}/api/messages/${encodeURIComponent(username)}`, { 
+        credentials: 'include',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
       const history = await res.json();
       this.chats.get(username).messages = history;
       const fragment = document.createDocumentFragment();
@@ -684,6 +739,7 @@ class ZapChat {
     this.dom.emojiPicker.appendChild(fragment);
   }
 
+  // ✅ FIXED: Submits Bearer Authorization header flags to construct WebRTC rooms
   async initiateCall(callType) {
     if (!this.activeChat) return;
     if (!this.onlineSet.has(this.activeChat)) {
@@ -692,10 +748,14 @@ class ZapChat {
     }
 
     try {
+      const token = localStorage.getItem('zapchat_token');
       const res = await fetch(`${this.api}/api/create-room`, {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({ with: this.activeChat, privacy: 'private' }),
       });
       const data = await res.json().catch(() => ({}));
