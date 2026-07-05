@@ -9,6 +9,11 @@ const { v4: uuidv4 } = require('uuid');
 const path       = require('path');
 const mongoose  = require('mongoose');
 
+// Cloudinary & Multer File Stream Handlers Injection
+const { v2: cloudinary } = require('cloudinary');
+const multer     = require('multer');
+const fs         = require('fs');
+
 // ─── Environment ─────────────────────────────────────────────────────────────
 const JWT_SECRET   = process.env.JWT_SECRET   || 'zapchat_super_secret_key_2024';
 const PORT         = process.env.PORT         || 5000;
@@ -75,6 +80,32 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ─── Cloudinary Custom Engine Architecture Configuration ──────────────────────
+cloudinary.config({ 
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'tlj8rmyp', 
+    api_key: process.env.CLOUDINARY_API_KEY || '788338267476531', 
+    api_secret: process.env.CLOUDINARY_API_SECRET // Injected securely via Railway Panel Variables
+});
+
+// Staging directory safeguard checklist verification block
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)){
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => { cb(null, uploadDir); },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB physical limit max check
+});
 
 // ─── MongoDB Connection ──────────────────────────────────────────────────────
 let isMongoConnected = false;
@@ -157,6 +188,49 @@ app.get('/health', (_req, res) => {
     database:  useDB() ? 'CONNECTED' : 'FALLBACK_MEMORY',
     timestamp: new Date().toISOString(),
   });
+});
+
+// Media Pipeline Upload Logic Endpoint 
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, error: 'No multi-part binary file attachment detected.' });
+        }
+
+        // Push staging local document stream storage over CDN endpoint
+        const uploadResult = await cloudinary.uploader.upload(req.file.path, {
+            folder: 'zapchat_media', 
+            resource_type: 'auto', 
+            transformation: [
+                { width: 1000, height: 1000, crop: 'limit' }, 
+                { fetch_format: 'auto', quality: 'auto' } 
+            ]
+        });
+
+        // Drop storage file tracking array footprint from server local cache folder 
+        fs.unlink(req.file.path, (err) => {
+            if (err) console.error("Temp file extraction purge error:", err);
+        });
+
+        return res.json({ 
+            success: true,
+            url: uploadResult.secure_url,
+            public_id: uploadResult.public_id
+        });
+
+    } catch (error) {
+        console.error("Cloudinary Engine Fault:", error);
+        
+        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+            try { fs.unlinkSync(req.file.path); } catch (e) { console.error(e); }
+        }
+        
+        return res.status(500).json({ 
+            success: false, 
+            error: 'Storage backend cloud file pipeline broken.',
+            details: error.message 
+        });
+    }
 });
 
 // Auth: Registration
