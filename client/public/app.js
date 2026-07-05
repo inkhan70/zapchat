@@ -3,18 +3,9 @@
    ═══════════════════════════════════════════ */
 
 // ─── Backend API base URL ─────────────────────────────────────────────────────
-// ⚠️  REPLACE BEFORE COMMITTING. Get the URL from:
-//     Railway dashboard → project c3d843e5-f233-4cf2-837e-27860a62187d
-//       → click backend service → Settings → Networking → Public Networking
-//       → copy the *.up.railway.app URL (or click "Generate Domain")
-//
-//   Quick replace once you have it:
-//     sed -i "s|YOUR-SERVICE.up.railway.app|<paste-real-url-here>|" client/public/app.js
-//
-//   Both API and BACKEND_SERVER should be the SAME Railway URL.
-//   (Legacy code split them for Vercel proxy routing.)
-const API = 'https://zapchat-production.up.railway.app';
-const BACKEND_SERVER = 'https://zapchat-production.up.railway.app';
+const API = window.location.origin.includes('localhost') 
+  ? 'http://localhost:5000' 
+  : 'https://zapchat-production.up.railway.app';
 
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😢','😡','🔥','❤️','👍','👎','🎉','🙌','💯','✅','🚀','💬','⚡','🌟','😮','🤣','😅','🥳','😴','🤝','🙏','👋','💪','🎊','🌈'];
 
@@ -195,52 +186,47 @@ class ZapChat {
     this.showToast('Calling...', `Starting ${type} call with ${this.activeChat}`, 'message');
 
     try {
-      // Step 1: Query your separate backend Vercel server to build a space securely
-      const response = await fetch(`${BACKEND_SERVER}/api/calls/room`, {
+      // Direct call routing payload matching backend server endpoints
+      const response = await fetch(`${API}/api/create-room`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.token}`
         },
         body: JSON.stringify({
-          roomName: `zapchat-${this.user.username}-${this.activeChat}-${Date.now()}`
+          with: this.activeChat,
+          privacy: 'private'
         })
       });
 
       const data = await response.json();
 
-      if (!response.ok || !data.ok) {
+      if (!response.ok) {
         throw new Error(data.error || 'Server rejected call setup request.');
       }
 
-      // Step 2: Use the response token and properties to link the user to the WebRTC screen
-      console.log('Metered room created successfully:', data.room.roomName);
+      console.log('Metered Signaling Room Configured:', data.roomName);
       
-      // Send a signaling link through websockets to alert the receiver
-      this.socket.emit('call_incoming', {
+      // Emit signal down backend socket architecture structure
+      this.socket.emit('call_invite', {
         to: this.activeChat,
-        roomName: data.room.roomName,
-        type: type
+        callType: type,
+        roomURL: data.publicURL,
+        roomName: data.roomName
       });
 
-      this.joinCallRoom(data.room.roomName, type);
+      this.joinCallRoom(data.publicURL);
 
     } catch (err) {
       console.error('Failed to initiate call:', err);
-      this.showToast('Call Error', err.message || 'Could not connect to voice/video services.', 'error');
+      this.showToast('Call Error', err.message || 'Could not connect to signaling servers.', 'error');
     }
   }
 
-  joinCallRoom(roomName, type) {
-    // If you are using the Metered Embedded iframe or library script:
-    // This dynamically configures an iframe area or overlay view.
-    const domain = 'zapchat.metered.live'; // Your Metered domain string handle
-    const callUrl = `https://${domain}/${roomName}?video=${type === 'video'}&audio=true`;
-    
-    // Simple popup/iframe system for standard deployment setups
-    const callWindow = window.open(callUrl, 'ZapChat Call', 'width=800,height=600');
+  joinCallRoom(publicURL) {
+    const callWindow = window.open(publicURL, 'ZapChat Call', 'width=1000,height=700');
     if (!callWindow) {
-      this.showToast('Popup Blocked', 'Please allow popups to enter the call screen room.', 'error');
+      this.showToast('Popup Blocked', 'Please allow popups to enter the call session.', 'error');
     }
   }
 
@@ -267,12 +253,27 @@ class ZapChat {
       console.log('🔴 Socket disconnected');
     });
 
-    // Incoming call signal receiver setup
-    this.socket.on('incoming_call_signal', ({ from, roomName, type }) => {
-      const accept = confirm(`Incoming ${type} call from ${from}. Accept?`);
+    // Handlers for incoming call invitations matching backend orchestration parameters
+    this.socket.on('call_invite', ({ from, callType, roomURL, roomName }) => {
+      const accept = confirm(`Incoming ${callType} call from ${from}. Accept?`);
       if (accept) {
-        this.joinCallRoom(roomName, type);
+        this.socket.emit('call_accept', { to: from, roomURL, roomName });
+        this.joinCallRoom(roomURL);
+      } else {
+        this.socket.emit('call_reject', { to: from });
       }
+    });
+
+    this.socket.on('call_accepted', ({ from, roomURL }) => {
+      this.showToast('Call Connected', `${from} accepted the invitation.`, 'message');
+    });
+
+    this.socket.on('call_rejected', ({ from }) => {
+      this.showToast('Call Declined', `${from} busy or rejected your call.`, 'error');
+    });
+
+    this.socket.on('call_failed', ({ reason }) => {
+      this.showToast('Call Failed', reason, 'error');
     });
 
     this.socket.on('online_users', users => {
@@ -558,7 +559,6 @@ class ZapChat {
   stopTyping() {
     if (this.isTyping && this.activeChat) {
       this.isTyping = false;
-      this.socket.emit('typing_start', { to: this.activeChat });
       this.socket.emit('typing_stop', { to: this.activeChat });
     }
     clearTimeout(this.typingTimer);
@@ -617,6 +617,8 @@ class ZapChat {
 
   upsertChatsSection(username) {
     const section = this.domCache.chatsSection;
+    if (!section) return;
+    
     const emptyState = section.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
 
