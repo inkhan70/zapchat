@@ -1,7 +1,7 @@
 {
   "name": "zap-chat-server",
   "version": "1.0.0",
-  "description": "ZapChat - Full Stack Real-Time Chat App Backend",
+  "description": "ZapChat - Full Stack Real-Time Chat App Backend and Frontend",
   "main": "index.js",
   "engines": {
     "node": ">=20.0.0",
