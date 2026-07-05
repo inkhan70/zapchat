@@ -18,16 +18,19 @@ const MONGODB_URI  = process.env.MONGODB_URI;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zapchat-5ru.pages.dev';
-const GOOGLE_CALLBACK_URL = 'https://zapchat-production.up.railway.app/api/auth/google/callback';
 
-// ✅ FIXED: Updated configuration names to fully match your Vercel panel settings
+// Dynamic Callback Selection based on current hosting site environment
+const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+const GOOGLE_CALLBACK_URL = `${SERVER_URL.replace(/\/$/, '')}/api/auth/google/callback`;
+
+// Metered STUN/TURN Configurations
 const METERED_APP_DOMAIN = process.env.METERED_DOMAIN || process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live';
 const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY;
 const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
 
-// Explicit allowed-origin list. Whitelisted Cloudflare Pages URL
+// Explicit allowed-origin list
 const ALLOWED_ORIGINS = [
-  'https://zapchat-5ru.pages.dev', // Added Cloudflare production domain
+  'https://zapchat-5ru.pages.dev',
   'https://zapchat-server.vercel.app',
   'https://zapchat-server-inkhan.vercel.app',
   'https://inkhan70-zapchat.vercel.app',
@@ -62,7 +65,18 @@ const server = http.createServer(app);
 // ✅ CRITICAL FOR RAILWAY: Trust upstream reverse proxy layers for secure headers/cookies
 app.set('trust proxy', 1);
 
-// ─── MongoDB ─────────────────────────────────────────────────────────────────
+// ─── Express Core Global Middleware ──────────────────────────────────────────
+app.use(cors({
+  origin:      corsOriginValidator,
+  credentials: true,
+  methods:     ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+app.options('*', cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ─── MongoDB Connection ──────────────────────────────────────────────────────
 let isMongoConnected = false;
 
 if (MONGODB_URI) {
@@ -91,7 +105,7 @@ const UserSchema = new mongoose.Schema({
   id:           { type: String, required: true, unique: true },
   username:     { type: String, required: true, unique: true, index: true },
   email:        { type: String, unique: true, sparse: true },
-  passwordHash: { type: String }, // Nullable for Google OAuth accounts
+  passwordHash: { type: String }, 
   avatar:       { type: String },
   status:       { type: String, default: 'Hey there! I am using ZapChat.' },
   createdAt:    { type: Date, default: Date.now },
@@ -112,22 +126,10 @@ MessageSchema.index({ roomId: 1, to: 1, read: 1 });
 const UserModel    = mongoose.models.User    || mongoose.model('User',    UserSchema);
 const MessageModel = mongoose.models.Message || mongoose.model('Message', MessageSchema);
 
-// ─── In-Memory Fallback ──────────────────────────────────────────────────────
-const users       = new Map();
+// ─── In-Memory Fallback Storage Maps ─────────────────────────────────────────
+const users        = new Map();
 const messages    = new Map();
 const onlineUsers = new Map();
-
-// ─── Express Middleware ──────────────────────────────────────────────────────
-app.use(cors({
-  origin:      corsOriginValidator,
-  credentials: true,
-  methods:     ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
-app.options('*', cors());
-app.use(express.json());
-
-app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function getRoomId(a, b) { return [a, b].sort().join('::'); }
@@ -146,7 +148,18 @@ function useDB() {
   return isMongoConnected && mongoose.connection.readyState === 1;
 }
 
-// ─── REST: Auth ───────────────────────────────────────────────────────────────
+// ─── REST Routing Endpoints ──────────────────────────────────────────────────
+
+// Health Check
+app.get('/health', (_req, res) => {
+  res.status(200).json({
+    status:    'UP',
+    database:  useDB() ? 'CONNECTED' : 'FALLBACK_MEMORY',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Auth: Registration
 app.post('/api/register', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password)    return res.status(400).json({ error: 'Username and password required' });
@@ -178,6 +191,7 @@ app.post('/api/register', async (req, res) => {
   res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar, status: user.status } });
 });
 
+// Auth: Login
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -197,7 +211,7 @@ app.post('/api/login', async (req, res) => {
   res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar, status: user.status } });
 });
 
-// ─── ✅ NEW: GOOGLE OAUTH FLOW ENDPOINTS ──────────────────────────────────────
+// Google OAuth Initializer
 app.get('/api/auth/google', (req, res) => {
   const rootUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
   const options = {
@@ -216,12 +230,12 @@ app.get('/api/auth/google', (req, res) => {
   return res.redirect(`${rootUrl}?${qs.toString()}`);
 });
 
+// Google OAuth Authorization Redirection Receiver Endpoint
 app.get('/api/auth/google/callback', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.redirect(`${FRONTEND_URL}?error=oauth_failed`);
 
   try {
-    // 1. Exchange standard auth code for verification payload token
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -237,7 +251,6 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const tokens = await tokenRes.json();
     if (!tokenRes.ok) throw new Error(tokens.error_description || 'Failed to exchange token');
 
-    // 2. Extract specific email identity payload markers
     const profileRes = await fetch(`https://www.googleapis.com/oauth2/v1/userinfo?alt=json&access_token=${tokens.access_token}`);
     const profile = await profileRes.json();
 
@@ -249,7 +262,6 @@ app.get('/api/auth/google/callback', async (req, res) => {
     if (dbActive) {
       user = await UserModel.findOne({ email }).lean();
       if (!user) {
-        // Enforce uniqueness for custom placeholder names
         const uniqueCheck = await UserModel.findOne({ username }).select('_id').lean();
         if (uniqueCheck) username += Math.floor(1000 + Math.random() * 9000);
 
@@ -279,10 +291,8 @@ app.get('/api/auth/google/callback', async (req, res) => {
       }
     }
 
-    // 3. Issue systemic authentication JWT token mapping
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
     
-    // Redirect cleanly back to the dashboard, passing structural session payloads
     return res.redirect(`${FRONTEND_URL}?token=${token}&user=${encodeURIComponent(JSON.stringify({
       id: user.id,
       username: user.username,
@@ -296,7 +306,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
   }
 });
 
-// ─── REST: Users ──────────────────────────────────────────────────────────────
+// Directory User Search Lookup
 app.get('/api/users', async (req, res) => {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
@@ -315,7 +325,7 @@ app.get('/api/users', async (req, res) => {
   })));
 });
 
-// ─── REST: Messages ───────────────────────────────────────────────────────────
+// Channel/Room Message Repository Feeds
 app.get('/api/messages/:with', async (req, res) => {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
@@ -332,7 +342,7 @@ app.get('/api/messages/:with', async (req, res) => {
   res.json(msgs);
 });
 
-// ─── REST: Secure TURN Server Credential Proxy ──────────────────────
+// Secure TURN Server Credential Proxy Token Fetcher
 app.get('/api/turn-credentials', async (req, res) => {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
@@ -344,7 +354,7 @@ app.get('/api/turn-credentials', async (req, res) => {
   try {
     const response = await fetch(`https://${METERED_APP_DOMAIN}/api/v1/turn/credentials?apiKey=${METERED_SECRET_KEY}`);
     if (!response.ok) {
-        throw new Error(`Metered provider platform returned status code: ${response.status}`);
+        throw new Error(`Metered platform integration threw HTTP error status code: ${response.status}`);
     }
     const iceServers = await response.json();
     res.json(iceServers);
@@ -354,7 +364,7 @@ app.get('/api/turn-credentials', async (req, res) => {
   }
 });
 
-// ─── REST: Metered Room Creation ─────────────────────────────────────────────
+// WebRTC Infrastructure Room Generator Endpoint
 app.post('/api/create-room', async (req, res) => {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
@@ -406,21 +416,8 @@ app.post('/api/create-room', async (req, res) => {
         let parsed;
         try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
         const detail = parsed?.message || parsed?.error || raw || createRes.statusText;
-        const maskedUrl = `${METERED_API_BASE}/room?secretKey=***${METERED_SECRET_KEY.slice(-4)}`;
-        console.error('❌ Metered create-room failed', {
-          status:    createRes.status,
-          domain:    METERED_APP_DOMAIN,
-          roomName,
-          privacy,
-          url:       maskedUrl,
-          detail,
-          rawBody:   raw.slice(0, 500),
-        });
-        return res.status(createRes.status).json({
-          error:  'Metered create-room failed',
-          detail,
-          domain: METERED_APP_DOMAIN,
-        });
+        console.error('❌ Metered create-room failed', { status: createRes.status, roomName, detail });
+        return res.status(createRes.status).json({ error: 'Metered create-room failed', detail });
       }
       room = JSON.parse(raw);
     }
@@ -440,21 +437,12 @@ app.post('/api/create-room', async (req, res) => {
   }
 });
 
-// ─── Health Check ─────────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => {
-  res.status(200).json({
-    status:    'UP',
-    database:  useDB() ? 'CONNECTED' : 'FALLBACK_MEMORY',
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// ─── Wildcard SPA Fallback ────────────────────────────────────────────────────
+// ✅ SPA Wildcard Catch-all Path Fallback (MUST stay placed directly below other API routes)
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ─── Socket.io Configuration ─────────────────────────────────────────────────
+// ─── Socket.io Configuration Engine ──────────────────────────────────────────
 const io = new Server(server, {
   cors: {
     origin:      ALLOWED_ORIGINS,
@@ -468,7 +456,7 @@ const io = new Server(server, {
   cookie:        false,
 });
 
-// ─── Socket Auth Middleware ───────────────────────────────────────────────────
+// Socket Auth Verification Interceptor Middleware Layer
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error('Authentication required'));
@@ -478,7 +466,7 @@ io.use((socket, next) => {
   } catch { next(new Error('Invalid token')); }
 });
 
-// ─── Socket Event Handlers ────────────────────────────────────────────────────
+// Socket Communications Broker Event Infrastructure
 io.on('connection', socket => {
   const { username } = socket.user;
   onlineUsers.set(username, socket.id);
@@ -531,7 +519,7 @@ io.on('connection', socket => {
     if (senderSocket) io.to(senderSocket).emit('messages_read', { by: username });
   });
 
-  // ─── CALL SIGNALING SYSTEM ──────────────────────────────────────────────────
+  // Call Signaling Mechanics Channels
   socket.on('call_invite', ({ to, callType, roomURL, roomName }) => {
     const targetSocket = onlineUsers.get(to);
     if (!targetSocket) {
@@ -574,7 +562,7 @@ io.on('connection', socket => {
   });
 });
 
-// ─── Start ────────────────────────────────────────────────────────────────────
+// ─── Operational Initialization Ignition ──────────────────────────────────────
 server.listen(PORT, () => {
   console.log(`🚀 ZapChat server running on port ${PORT}`);
 });
