@@ -3,3 +3,6 @@ node_modules/
 *.log
 .DS_Store
 dist/
+
+# Server runtime artifacts — never commit user uploads or local node_modules.
+server/uploads/

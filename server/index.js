@@ -82,10 +82,13 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Cloudinary Custom Engine Architecture Configuration ──────────────────────
-cloudinary.config({ 
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'tlj8rmyp', 
-    api_key: process.env.CLOUDINARY_API_KEY || '788338267476531', 
-    api_secret: process.env.CLOUDINARY_API_SECRET // Injected securely via Railway Panel Variables
+// Credentials MUST be supplied via environment variables (Railway Variables
+// panel). Do NOT hardcode fallbacks here — a previous version of this file
+// shipped with plaintext credentials baked in, which is what we're fixing.
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key:    process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
 // Staging directory safeguard checklist verification block
