@@ -423,21 +423,19 @@ class ZapChat {
     this.socket.on('typing_stop', ({ from }) => this.onTypingStop(from));
     this.socket.on('messages_read', ({ by }) => this.onMessagesRead(by));
 
-    this.socket.on('call_invite', ({ from, callType, roomURL, roomName }) => {
-      const accept = confirm(`Incoming ${callType} call from ${from}. Accept?`);
-      if (accept) {
-        this.callRoom = { roomName, with: from, url: roomURL };
-        this.socket.emit('call_accept', { to: from, roomURL, roomName });
-        window.open(roomURL, 'ZapChat Call', 'width=1000,height=720');
-      } else {
-        this.socket.emit('call_reject', { to: from });
-      }
+    // ─── Call signaling — spec event names (initiate-call / accept-call / end-call) ───
+    this.socket.on('incoming-call', (data) => this.onIncomingCall(data));
+    this.socket.on('call-accepted', ({ roomName }) => this.onCallAccepted({ roomName }));
+    this.socket.on('call-failed', ({ reason }) => {
+      this.showToast('Call failed', reason || 'Could not reach that user.', 'error');
+      this.terminateLocalCallSession();
     });
-
-    this.socket.on('call_accepted', ({ from }) => this.showToast('Call accepted', `${from} joined the call.`));
-    this.socket.on('call_rejected', ({ from }) => this.showToast('Call declined', `${from} declined the call.`, 'error'));
-    this.socket.on('call_failed', ({ reason }) => this.showToast('Call failed', reason || 'Could not reach that user.', 'error'));
-    this.socket.on('call_ended', ({ from }) => this.showToast('Call ended', `${from} ended the call.`));
+    this.socket.on('call-ended', () => this.onCallEnded());
+    this.socket.on('user-disconnected', () => {
+      // Peer socket vanished — tear down our WebRTC session cleanly so we
+      // don't keep charging Metered for an orphaned room.
+      if (this.meetingSession) this.terminateLocalCallSession();
+    });
   }
 
   // ✅ FIXED: Added standard Authorization headers across data request calls
@@ -739,7 +737,213 @@ class ZapChat {
     this.dom.emojiPicker.appendChild(fragment);
   }
 
-  // ✅ FIXED: Submits Bearer Authorization header flags to construct WebRTC rooms
+  // ─── WebRTC Calling Engine (Metered SDK embedded) ─────────────────────────
+  // Task 3 + 4 + 5 spec implementation.
+  //
+  // Flow:
+  //   1. caller → POST /api/call/create-room (idempotent Metered get-or-create)
+  //   2. caller → socket emit 'initiate-call' with {targetUserId, roomName, callType}
+  //   3. callee receives 'incoming-call' → onIncomingCall() asks user, then
+  //      emits 'accept-call' (or end-call to reject) and runs
+  //      startVideoAudioCall(roomName, callType).
+  //   4. caller receives 'call-accepted' → runs startVideoAudioCall() locally.
+  //   5. Either side hangs up → socket emit 'end-call' + terminateLocalCallSession().
+  //   6. 30-second unanswered timer (callTimeoutTracker) auto-drops the call.
+
+  // Single active meeting session — null when idle.
+  meetingSession = null;
+  // 30s unanswered-call watchdog (Task 5)
+  callTimeoutTracker = null;
+  // Tracks the peer + call metadata for the lifecycle of one call.
+  pendingCallTarget = null;
+  pendingCallType = null;
+  pendingCallRoomName = null;
+
+  /**
+   * Task 3 spec — Embedded Metered MeetingSession initializer.
+   * Pulls validated room + domain from the backend (which proxies
+   * Metered.ca REST), joins, starts audio/video hardware, and binds
+   * remote-track events to the DOM grid.
+   */
+  async startVideoAudioCall(roomName, callType) {
+    try {
+      // 1. Fetch official validation tokens from the backend.
+      const token = localStorage.getItem('zapchat_token');
+      const backendResponse = await fetch(`${this.api}/api/call/create-room`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ roomName }),
+      });
+      const callData = await backendResponse.json().catch(() => ({}));
+      if (!backendResponse.ok || !callData.success) {
+        throw new Error(callData.error || 'Backend failed to synchronize call room mapping.');
+      }
+
+      // 2. Instantiate the Metered Meeting Session.
+      // Metered SDK exposes window.Metered.MeetingSession in 1.4.6+.
+      const MeetingCtor = (window.metered && window.metered.MeetingSession)
+        || (window.Metered && window.Metered.MeetingSession);
+      if (!MeetingCtor) throw new Error('Metered SDK not loaded');
+
+      this.meetingSession = new MeetingCtor();
+
+      await this.meetingSession.join({
+        roomName: callData.roomName,
+        // Backend returns the canonical subdomain like 'zapchat-server.metered.live'
+        // and we pass it directly to the SDK's roomDomain.
+        roomDomain: callData.appMetricDomain,
+        name: this.user?.username || 'ZapChat User',
+      });
+
+      console.log('Successfully joined the encrypted communication matrix');
+
+      // 3. Hardware stream ingestion.
+      if (callType === 'video') {
+        await this.meetingSession.startVideo();
+        await this.meetingSession.startAudio();
+      } else {
+        await this.meetingSession.startAudio(); // audio-only configuration
+      }
+
+      // 4. Local video binding (mirror to BOTH legacy and spec element IDs).
+      this.meetingSession.on('localTrackStarted', (trackItem) => {
+        if (trackItem.type === 'video' && trackItem.stream) {
+          const localCanvas = document.getElementById('localVideoTrackGrid')
+            || document.getElementById('call-local-video');
+          if (localCanvas) localCanvas.srcObject = trackItem.stream;
+        }
+      });
+
+      // 5. Remote track binding — Task 4 spec implementation.
+      this.meetingSession.on('remoteTrackStarted', (trackItem) => {
+        console.log(`Remote media track detected: [${trackItem.type}] from participant: [${trackItem.participantSessionId}]`);
+        const grid = document.getElementById('remoteVideoTrackGrid')
+          || document.getElementById('call-remote-grid');
+        if (!grid) return;
+
+        if (trackItem.type === 'video') {
+          // Find-or-create the remote video element keyed by participantSessionId.
+          let remoteVideoNode = document.getElementById(`remote-video-${trackItem.participantSessionId}`);
+          if (!remoteVideoNode) {
+            remoteVideoNode = document.createElement('video');
+            remoteVideoNode.id = `remote-video-${trackItem.participantSessionId}`;
+            remoteVideoNode.autoplay = true;
+            remoteVideoNode.playsInline = true;
+            remoteVideoNode.className = 'remote-video-frame mirrors-default-style';
+            grid.appendChild(remoteVideoNode);
+          }
+          remoteVideoNode.srcObject = trackItem.stream;
+        } else if (trackItem.type === 'audio') {
+          // Audio-only peers get a hidden <audio> element so their voice plays.
+          let audioEl = document.getElementById(`remote-audio-${trackItem.participantSessionId}`);
+          if (!audioEl) {
+            audioEl = document.createElement('audio');
+            audioEl.id = `remote-audio-${trackItem.participantSessionId}`;
+            audioEl.autoplay = true;
+            document.body.appendChild(audioEl);
+          }
+          audioEl.srcObject = trackItem.stream;
+        }
+
+        // Reflect connected state on the legacy status overlay.
+        const overlay = document.getElementById('connectionStatusOverlay')
+          || document.getElementById('call-status-text');
+        if (overlay) overlay.textContent = 'Connected';
+      });
+
+      // Task 4 — remote track cleanup (camera revoked, network drop, etc.)
+      this.meetingSession.on('remoteTrackStopped', (trackItem) => {
+        const remoteVideoNode = document.getElementById(`remote-video-${trackItem.participantSessionId}`);
+        if (remoteVideoNode && trackItem.type === 'video') {
+          remoteVideoNode.srcObject = null;
+          remoteVideoNode.remove();
+          console.log(`Cleaned up video element for track session: ${trackItem.participantSessionId}`);
+        }
+        const audioEl = document.getElementById(`remote-audio-${trackItem.participantSessionId}`);
+        if (audioEl && trackItem.type === 'audio') audioEl.remove();
+      });
+
+      // Participant dropped out entirely → close our session.
+      this.meetingSession.on('participantLeft', () => {
+        console.log('Remote peer connection dropped out.');
+        this.terminateLocalCallSession();
+      });
+
+      // Show the embedded grid, hide the legacy modal backdrop.
+      const gridWrap = document.getElementById('videoCallGridWrapper');
+      if (gridWrap) gridWrap.classList.remove('hidden');
+      const modal = document.getElementById('call-modal');
+      if (modal) modal.classList.add('hidden');
+
+      // Call answered → clear the 30s watchdog (Task 5).
+      if (this.callTimeoutTracker) {
+        clearTimeout(this.callTimeoutTracker);
+        this.callTimeoutTracker = null;
+        console.log('Call successfully established across WebRTC tunnels.');
+      }
+    } catch (err) {
+      console.error('WebRTC Signaling Error:', err);
+      this.showToast('Connection failed', 'Please check camera/microphone permissions and network firewalls.', 'error');
+      this.terminateLocalCallSession();
+    }
+  }
+
+  /**
+   * Task 3 spec — clean teardown of local WebRTC session.
+   * Leaves the Metered room, drops all MediaStream references so the
+   * browser stops charging the device, and clears the DOM grid.
+   */
+  terminateLocalCallSession() {
+    if (this.callTimeoutTracker) {
+      clearTimeout(this.callTimeoutTracker);
+      this.callTimeoutTracker = null;
+    }
+    if (this.meetingSession) {
+      try { this.meetingSession.leave(); } catch (_) { /* ignore */ }
+      this.meetingSession = null;
+    }
+    // Clear HTML streams — legacy IDs + spec IDs.
+    const localEl = document.getElementById('localVideoTrackGrid')
+      || document.getElementById('call-local-video');
+    if (localEl) localEl.srcObject = null;
+    const remoteGrid = document.getElementById('remoteVideoTrackGrid')
+      || document.getElementById('call-remote-grid');
+    if (remoteGrid) {
+      remoteGrid.querySelectorAll('video, audio').forEach(el => el.remove());
+    }
+    document.querySelectorAll('[id^="remote-video-"], [id^="remote-audio-"]').forEach(el => el.remove());
+
+    const gridWrap = document.getElementById('videoCallGridWrapper');
+    if (gridWrap) gridWrap.classList.add('hidden');
+
+    this.pendingCallTarget = null;
+    this.pendingCallType = null;
+    this.pendingCallRoomName = null;
+    console.log('WebRTC session terminated cleanly.');
+  }
+
+  /**
+   * Task 5 spec — 30-second unanswered-call watchdog.
+   * If the peer doesn't answer in time, drop the call like WhatsApp does.
+   */
+  initiateCallTimeoutCounter(targetUserId, roomName) {
+    if (this.callTimeoutTracker) clearTimeout(this.callTimeoutTracker);
+    this.callTimeoutTracker = setTimeout(() => {
+      console.log('Call timed out - No response from remote peer.');
+      this.socket?.emit('end-call', { targetUserId, roomName });
+      this.terminateLocalCallSession();
+      const overlay = document.getElementById('connectionStatusOverlay')
+        || document.getElementById('call-status-text');
+      if (overlay) overlay.textContent = 'No answer';
+      this.showToast('Call timed out', 'User did not answer.');
+    }, 30000);
+  }
+
+  // ─── Caller entrypoint ───────────────────────────────────────────────────
   async initiateCall(callType) {
     if (!this.activeChat) return;
     if (!this.onlineSet.has(this.activeChat)) {
@@ -747,37 +951,83 @@ class ZapChat {
       return;
     }
 
+    const targetUserId = this.activeChat;
     try {
+      // Pre-mint the room so we can pass `roomName` on the wire.
       const token = localStorage.getItem('zapchat_token');
-      const res = await fetch(`${this.api}/api/create-room`, {
+      const res = await fetch(`${this.api}/api/call/create-room`, {
         method: 'POST',
         credentials: 'include',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${token}`,
         },
-        body: JSON.stringify({ with: this.activeChat, privacy: 'private' }),
+        body: JSON.stringify({ with: targetUserId, privacy: 'private' }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Could not create call room.');
 
-      this.callRoom = { roomName: data.roomName, with: this.activeChat, url: data.publicURL };
-      this.socket?.emit('call_invite', {
-        to: this.activeChat,
+      const roomName = data.roomName;
+      this.pendingCallTarget = targetUserId;
+      this.pendingCallType = callType;
+      this.pendingCallRoomName = roomName;
+
+      // Show the spec grid overlay with a connecting state.
+      const gridWrap = document.getElementById('videoCallGridWrapper');
+      if (gridWrap) gridWrap.classList.remove('hidden');
+      const overlay = document.getElementById('connectionStatusOverlay')
+        || document.getElementById('call-status-text');
+      if (overlay) overlay.textContent = 'Ringing…';
+
+      // Fire the spec socket event.
+      this.socket?.emit('initiate-call', {
+        targetUserId,
+        callerInfo: { username: this.user?.username },
+        roomName,
         callType,
-        roomURL: data.publicURL,
-        roomName: data.roomName,
       });
-      window.open(data.publicURL, 'ZapChat Call', 'width=1000,height=720');
+
+      // Start the 30s unanswered watchdog.
+      this.initiateCallTimeoutCounter(targetUserId, roomName);
     } catch (error) {
       this.showToast('Call error', error.message || 'Could not connect to call services.', 'error');
+      this.terminateLocalCallSession();
     }
   }
 
+  // ─── Callee entrypoint ───────────────────────────────────────────────────
+  onIncomingCall({ callerInfo, roomName, callType }) {
+    const from = callerInfo?.username || 'someone';
+    const label = callType === 'video' ? 'Video call' : 'Voice call';
+    const accept = confirm(`${label} from ${from}. Accept?`);
+    if (accept) {
+      // Spec event name + start the local session.
+      this.socket?.emit('accept-call', { targetUserId: from, roomName });
+      this.startVideoAudioCall(roomName, callType);
+    } else {
+      this.socket?.emit('end-call', { targetUserId: from, roomName });
+    }
+  }
+
+  // ─── Caller side: callee accepted ────────────────────────────────────────
+  onCallAccepted({ roomName }) {
+    // Use the callType the caller originally requested (audio vs video).
+    this.startVideoAudioCall(roomName, this.pendingCallType || 'video');
+  }
+
+  // ─── Either side: peer ended ─────────────────────────────────────────────
+  onCallEnded() {
+    this.showToast('Call ended', 'The other side ended the call.');
+    this.terminateLocalCallSession();
+  }
+
+  // Hangup button handler
   endCall() {
-    if (!this.callRoom?.with) return;
-    this.socket?.emit('call_end', { to: this.callRoom.with });
-    this.callRoom = null;
+    const targetUserId = this.pendingCallTarget;
+    const roomName = this.pendingCallRoomName || '';
+    if (!targetUserId && !this.meetingSession) return;
+    this.socket?.emit('end-call', { targetUserId, roomName });
+    this.terminateLocalCallSession();
   }
 
   showToast(title, body, type = 'message') {

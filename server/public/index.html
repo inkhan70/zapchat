@@ -205,6 +205,13 @@
       </div>
     </div>
 
+    <!-- WebRTC media handshake grid (Task 3/4 spec) — populated by Metered.MeetingSession events -->
+    <div id="videoCallGridWrapper" class="video-grid-wrapper hidden">
+      <video id="localVideoTrackGrid" autoplay muted playsinline></video>
+      <div id="remoteVideoTrackGrid" class="remote-video-grid"></div>
+      <div id="connectionStatusOverlay" class="connection-status-overlay">Initializing…</div>
+    </div>
+
     <aside class="call-roster" id="call-roster">
       <div class="call-roster-title">
         <i class="fas fa-users"></i>

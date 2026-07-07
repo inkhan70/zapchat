@@ -9,6 +9,9 @@ const { v4: uuidv4 } = require('uuid');
 const path       = require('path');
 const mongoose  = require('mongoose');
 
+// Metered WebRTC call-room helper (axios-backed REST wrapper)
+const { getOrCreateCallRoom } = require('./utils/metered');
+
 // Cloudinary & Multer File Stream Handlers Injection
 const { v2: cloudinary } = require('cloudinary');
 const multer     = require('multer');
@@ -514,6 +517,54 @@ app.post('/api/create-room', async (req, res) => {
   }
 });
 
+// ─── WebRTC Call Room Generator (Stateless Idempotent Wrapper) ───────────────
+// Thin REST facade over Metered.ca: GET-or-POST a private room using axios.
+// Frontend hits this once per outgoing call to mint a fresh room URL and to
+// learn the canonical `appMetricDomain` to feed back into the SDK at join time.
+app.post('/api/call/create-room', async (req, res) => {
+  const decoded = verifyToken(req, res);
+  if (!decoded) return;
+
+  const explicit = (req.body && typeof req.body.roomName === 'string') ? req.body.roomName.trim() : '';
+  const withUser = (req.body && typeof req.body.with === 'string') ? req.body.with.trim() : '';
+
+  // Stable room name from sorted participant pair; fall back to per-user
+  // scratch rooms for users with no chat partner selected yet.
+  const roomName = (explicit
+    || [decoded.username, withUser].filter(Boolean).sort().join('-').toLowerCase()
+                                   .replace(/[^a-z0-9-]/g, '-')
+    || `zc-${decoded.username.toLowerCase()}-${Date.now()}`)
+                      .slice(0, 60);
+
+  try {
+    const roomInfo = await getOrCreateCallRoom(roomName);
+    // Return the FULL canonical domain (e.g. 'zapchat-server.metered.live')
+    // so the frontend can pass it directly to Metered SDK's roomDomain field
+    // without re-deriving the suffix. We strip a trailing `.metered.live`
+    // defensively to avoid double-suffixing in the response payload.
+    const rawDomain =
+      process.env.METERED_DOMAIN ||
+      process.env.METERED_APP_NAME ||
+      process.env.METERED_APP_DOMAIN ||
+      'zapchat-server.metered.live';
+    const appMetricDomain = rawDomain.includes('.metered.live')
+      ? rawDomain
+      : `${rawDomain}.metered.live`;
+    return res.status(200).json({
+      success:        true,
+      roomName:       roomInfo.roomName || roomName,
+      appMetricDomain,
+      privacy:        roomInfo.privacy || 'private',
+    });
+  } catch (error) {
+    console.error('❌ /api/call/create-room error:', error.message);
+    return res.status(500).json({
+      error: 'Failed to initialize secure call connection environment.',
+      detail: error.response?.data?.message || error.message,
+    });
+  }
+});
+
 // ✅ SPA Wildcard Catch-all Path Fallback (MUST stay placed directly below other API routes)
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -596,46 +647,53 @@ io.on('connection', socket => {
     if (senderSocket) io.to(senderSocket).emit('messages_read', { by: username });
   });
 
-  // Call Signaling Mechanics Channels
-  socket.on('call_invite', ({ to, callType, roomURL, roomName }) => {
-    const targetSocket = onlineUsers.get(to);
+  // ─── Call Signaling State Machine ──────────────────────────────────────────
+  // State transitions:
+  //   idle → ringing (initiate-call)
+  //   ringing → connected (accept-call)
+  //   ringing → idle (reject-call / end-call)
+  //   connected → idle (end-call / disconnect)
+  // Every emit propagates `roomName` so both peers can verify they're joining
+  // the same Metered room and so the UI can reconcile if events arrive
+  // out-of-order (e.g. accept during disconnect).
+  socket.on('initiate-call', ({ targetUserId, callerInfo, roomName, callType }) => {
+    const targetSocket = onlineUsers.get(targetUserId);
     if (!targetSocket) {
-      socket.emit('call_failed', { reason: 'User is offline' });
+      socket.emit('call-failed', { reason: 'User is offline' });
       return;
     }
-    io.to(targetSocket).emit('call_invite', {
-      from: username,
-      callType,   
-      roomURL,
+    io.to(targetSocket).emit('incoming-call', {
+      from:        socket.id,
+      callerInfo:  callerInfo || { username },
       roomName,
+      callType,
     });
   });
 
-  socket.on('call_accept', ({ to, roomURL, roomName }) => {
-    const callerSocket = onlineUsers.get(to);
+  socket.on('accept-call', ({ targetUserId, roomName }) => {
+    const callerSocket = onlineUsers.get(targetUserId);
     if (callerSocket) {
-      io.to(callerSocket).emit('call_accepted', { from: username, roomURL, roomName });
+      io.to(callerSocket).emit('call-accepted', { roomName });
     }
   });
 
-  socket.on('call_reject', ({ to }) => {
-    const callerSocket = onlineUsers.get(to);
-    if (callerSocket) {
-      io.to(callerSocket).emit('call_rejected', { from: username });
-    }
-  });
-
-  socket.on('call_end', ({ to }) => {
-    const otherSocket = onlineUsers.get(to);
+  // WhatsApp-style hard hangup: cleans up the server-side socket binding so
+  // a late `accept-call` from a stale tab cannot resurrect the call.
+  socket.on('end-call', ({ targetUserId, roomName }) => {
+    const otherSocket = onlineUsers.get(targetUserId);
     if (otherSocket) {
-      io.to(otherSocket).emit('call_ended', { from: username });
+      io.to(otherSocket).emit('call-ended', { roomName });
     }
   });
 
+  // Sudden network drop — broadcast to anyone who might be mid-call with us.
   socket.on('disconnect', reason => {
     onlineUsers.delete(username);
     console.log(`🔴 ${username} disconnected: ${reason}`);
     socket.broadcast.emit('user_status', { username, online: false });
+    // Surface a `user-disconnected` event for the call state machine so any
+    // active peer tears down their local WebRTC session cleanly.
+    io.emit('user-disconnected', socket.id);
   });
 });
 
