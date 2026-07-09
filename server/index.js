@@ -8,9 +8,7 @@ const jwt        = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const path       = require('path');
 const mongoose  = require('mongoose');
-
-// Metered WebRTC call-room helper (axios-backed REST wrapper)
-const { getOrCreateCallRoom } = require('./utils/metered');
+const axios     = require('axios');
 
 // Cloudinary & Multer File Stream Handlers Injection
 const { v2: cloudinary } = require('cloudinary');
@@ -32,9 +30,11 @@ const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 const GOOGLE_CALLBACK_URL = `${SERVER_URL.replace(/\/$/, '')}/api/auth/google/callback`;
 
 // Metered STUN/TURN Configurations
-const METERED_APP_DOMAIN = process.env.METERED_DOMAIN || process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live';
-const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY;
-const METERED_API_BASE   = `https://${METERED_APP_DOMAIN}/api/v1`;
+// .trim() defends against invisible whitespace that Railway (and other PaaS
+// dashboards) sometimes paste into env var values, which silently breaks
+// HMAC auth on every Metered REST call.
+const METERED_APP_DOMAIN = (process.env.METERED_DOMAIN || process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live').trim();
+const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY ? process.env.METERED_SECRET_KEY.trim() : process.env.METERED_SECRET_KEY;
 
 // Explicit allowed-origin list
 const ALLOWED_ORIGINS = [
@@ -444,124 +444,80 @@ app.get('/api/turn-credentials', async (req, res) => {
   }
 });
 
-// WebRTC Infrastructure Room Generator Endpoint
-app.post('/api/create-room', async (req, res) => {
+// ─── WebRTC Call Room Generator (Stateless Idempotent Wrapper) ───────────────
+// Thin REST facade over Metered.ca: GET-or-POST a public room using axios.
+// Frontend hits this once per outgoing call to mint a fresh room URL and to
+// learn the canonical `appMetricDomain` prefix to feed back into the SDK.
+//
+// env contract:
+//   METERED_SECRET_KEY  — required, no quotes/whitespace (Railway UI quirk)
+//   METERED_APP_NAME    — required, bare subdomain prefix like 'zapchat-server'
+//                         (frontend appends '.metered.live' at SDK-join time)
+app.post('/api/call/create-room', async (req, res) => {
+  // Auth gate — keeps the Metered secret from being burned by anonymous traffic.
   const decoded = verifyToken(req, res);
   if (!decoded) return;
 
-  if (!METERED_SECRET_KEY) {
-    return res.status(500).json({ error: 'Metered secret key not configured on server.' });
+  let { roomName } = req.body;
+
+  // Safely clean up hidden spaces or newline characters from the environment variables
+  const secretKey = process.env.METERED_SECRET_KEY ? process.env.METERED_SECRET_KEY.trim() : null;
+  const appName = process.env.METERED_APP_NAME ? process.env.METERED_APP_NAME.trim() : null;
+
+  if (!secretKey || !appName) {
+    console.error("CRITICAL ERROR: Metered environment variables are missing or unreadable on Railway.");
+    return res.status(500).json({
+      success: false,
+      error: "Server misconfiguration: Missing internal API keys."
+    });
   }
 
-  const withUser = (req.body && typeof req.body.with === 'string') ? req.body.with.trim() : '';
-  const explicit = (req.body && typeof req.body.roomName === 'string') ? req.body.roomName.trim() : '';
-  
-  const roomName = (explicit
-    || [decoded.username, withUser].filter(Boolean).sort().join('-').toLowerCase()
-                                   .replace(/[^a-z0-9-]/g, '-')
-    || `zc-${decoded.username.toLowerCase()}-${Date.now()}`)
-                      .slice(0, 60);
-  const privacy = (req.body && req.body.privacy === 'private') ? 'private' : 'public';
+  // Ensure roomName is URL-safe and doesn't contain spaces
+  roomName = roomName ? String(roomName).replace(/\s+/g, '-') : `room-${Date.now()}`;
 
   try {
-    let room = null;
-    try {
-      const existing = await fetch(
-        `${METERED_API_BASE}/room/${encodeURIComponent(roomName)}?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`
-      );
-      if (existing.ok) room = await existing.json();
-    } catch (_) {}
+    // Phase A: Test if the room already exists using explicit query params
+    const getUrl = `https://${appName}.metered.live/api/v1/room/${encodeURIComponent(roomName)}`;
+    const response = await axios.get(getUrl, {
+      params: { secretKey: secretKey },
+      headers: { 'Accept': 'application/json' }
+    });
 
-    if (!room) {
-      const createRes = await fetch(
-        `${METERED_API_BASE}/room?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`,
-        {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roomName,
-            privacy,
-            autoJoin:              true,
-            joinVideoOn:           true,
-            joinAudioOn:           true,
-            enableScreenSharing:   true,
-            enableChat:            true,
-            ejectAtRoomExp:        false,
-          }),
-        }
-      );
+    return res.status(200).json({
+      success: true,
+      roomName: response.data.roomName,
+      appMetricDomain: appName
+    });
 
-      const raw = await createRes.text();
-      if (!createRes.ok) {
-        let parsed;
-        try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
-        const detail = parsed?.message || parsed?.error || raw || createRes.statusText;
-        console.error('❌ Metered create-room failed', { status: createRes.status, roomName, detail });
-        return res.status(createRes.status).json({ error: 'Metered create-room failed', detail });
+  } catch (error) {
+    // Phase B: If the room does not exist (404), create it using a secure POST request payload
+    if (error.response && error.response.status === 404) {
+      try {
+        const postUrl = `https://${appName}.metered.live/api/v1/room`;
+        const createResponse = await axios.post(postUrl, {
+          roomName: roomName,
+          privacy: "public" // Explicitly public so users can handshake instantly without needing individual access tokens
+        }, {
+          params: { secretKey: secretKey },
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          }
+        });
+
+        return res.status(200).json({
+          success: true,
+          roomName: createResponse.data.roomName,
+          appMetricDomain: appName
+        });
+      } catch (createError) {
+        console.error("Metered Room Registration Failed:", createError.response ? createError.response.data : createError.message);
+        return res.status(500).json({ success: false, error: "Failed to establish dynamic audio/video layout room." });
       }
-      room = JSON.parse(raw);
     }
 
-    return res.json({
-      roomName:      room.roomName,
-      roomId:        room._id,
-      privacy:       room.privacy,
-      roomURL:       `https://${METERED_APP_DOMAIN}/${room.roomName}`,
-      appDomain:     METERED_APP_DOMAIN,
-      publicURL:     `https://${METERED_APP_DOMAIN}/${room.roomName}`,
-      context:       withUser ? { self: decoded.username, with: withUser } : null,
-    });
-  } catch (err) {
-    console.error('❌ /api/create-room error:', err);
-    return res.status(500).json({ error: 'Internal error creating room', detail: err.message });
-  }
-});
-
-// ─── WebRTC Call Room Generator (Stateless Idempotent Wrapper) ───────────────
-// Thin REST facade over Metered.ca: GET-or-POST a private room using axios.
-// Frontend hits this once per outgoing call to mint a fresh room URL and to
-// learn the canonical `appMetricDomain` to feed back into the SDK at join time.
-app.post('/api/call/create-room', async (req, res) => {
-  const decoded = verifyToken(req, res);
-  if (!decoded) return;
-
-  const explicit = (req.body && typeof req.body.roomName === 'string') ? req.body.roomName.trim() : '';
-  const withUser = (req.body && typeof req.body.with === 'string') ? req.body.with.trim() : '';
-
-  // Stable room name from sorted participant pair; fall back to per-user
-  // scratch rooms for users with no chat partner selected yet.
-  const roomName = (explicit
-    || [decoded.username, withUser].filter(Boolean).sort().join('-').toLowerCase()
-                                   .replace(/[^a-z0-9-]/g, '-')
-    || `zc-${decoded.username.toLowerCase()}-${Date.now()}`)
-                      .slice(0, 60);
-
-  try {
-    const roomInfo = await getOrCreateCallRoom(roomName);
-    // Return the FULL canonical domain (e.g. 'zapchat-server.metered.live')
-    // so the frontend can pass it directly to Metered SDK's roomDomain field
-    // without re-deriving the suffix. We strip a trailing `.metered.live`
-    // defensively to avoid double-suffixing in the response payload.
-    const rawDomain =
-      process.env.METERED_DOMAIN ||
-      process.env.METERED_APP_NAME ||
-      process.env.METERED_APP_DOMAIN ||
-      'zapchat-server.metered.live';
-    const appMetricDomain = rawDomain.includes('.metered.live')
-      ? rawDomain
-      : `${rawDomain}.metered.live`;
-    return res.status(200).json({
-      success:        true,
-      roomName:       roomInfo.roomName || roomName,
-      appMetricDomain,
-      privacy:        roomInfo.privacy || 'private',
-    });
-  } catch (error) {
-    console.error('❌ /api/call/create-room error:', error.message);
-    return res.status(500).json({
-      error: 'Failed to initialize secure call connection environment.',
-      detail: error.response?.data?.message || error.message,
-    });
+    console.error("Metered Communication Pipeline Broken:", error.response ? error.response.data : error.message);
+    return res.status(500).json({ success: false, error: "WebRTC internal handshake failure." });
   }
 });
 

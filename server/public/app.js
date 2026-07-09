@@ -793,9 +793,9 @@ class ZapChat {
 
       await this.meetingSession.join({
         roomName: callData.roomName,
-        // Backend returns the canonical subdomain like 'zapchat-server.metered.live'
-        // and we pass it directly to the SDK's roomDomain.
-        roomDomain: callData.appMetricDomain,
+        // Backend returns the bare subdomain prefix (e.g. 'zapchat-server');
+        // we append '.metered.live' here at SDK-join time.
+        roomDomain: `${callData.appMetricDomain}.metered.live`,
         name: this.user?.username || 'ZapChat User',
       });
 
