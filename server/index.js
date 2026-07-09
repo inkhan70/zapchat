@@ -30,9 +30,6 @@ const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 const GOOGLE_CALLBACK_URL = `${SERVER_URL.replace(/\/$/, '')}/api/auth/google/callback`;
 
 // Metered STUN/TURN Configurations
-// .trim() defends against invisible whitespace that Railway (and other PaaS
-// dashboards) sometimes paste into env var values, which silently breaks
-// HMAC auth on every Metered REST call.
 const METERED_APP_DOMAIN = (process.env.METERED_DOMAIN || process.env.METERED_APP_DOMAIN || 'zapchat-server.metered.live').trim();
 const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY ? process.env.METERED_SECRET_KEY.trim() : process.env.METERED_SECRET_KEY;
 
@@ -85,9 +82,6 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Cloudinary Custom Engine Architecture Configuration ──────────────────────
-// Credentials MUST be supplied via environment variables (Railway Variables
-// panel). Do NOT hardcode fallbacks here — a previous version of this file
-// shipped with plaintext credentials baked in, which is what we're fixing.
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key:    process.env.CLOUDINARY_API_KEY,
@@ -110,7 +104,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 10 * 1024 * 1024 } // 10MB physical limit max check
+    limits: { fileSize: 10 * 1024 * 1024 } 
 });
 
 // ─── MongoDB Connection ──────────────────────────────────────────────────────
@@ -203,7 +197,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             return res.status(400).json({ success: false, error: 'No multi-part binary file attachment detected.' });
         }
 
-        // Push staging local document stream storage over CDN endpoint
         const uploadResult = await cloudinary.uploader.upload(req.file.path, {
             folder: 'zapchat_media', 
             resource_type: 'auto', 
@@ -213,7 +206,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             ]
         });
 
-        // Drop storage file tracking array footprint from server local cache folder 
         fs.unlink(req.file.path, (err) => {
             if (err) console.error("Temp file extraction purge error:", err);
         });
@@ -226,11 +218,9 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
     } catch (error) {
         console.error("Cloudinary Engine Fault:", error);
-        
         if (req.file && req.file.path && fs.existsSync(req.file.path)) {
             try { fs.unlinkSync(req.file.path); } catch (e) { console.error(e); }
         }
-        
         return res.status(500).json({ 
             success: false, 
             error: 'Storage backend cloud file pipeline broken.',
@@ -445,22 +435,12 @@ app.get('/api/turn-credentials', async (req, res) => {
 });
 
 // ─── WebRTC Call Room Generator (Stateless Idempotent Wrapper) ───────────────
-// Thin REST facade over Metered.ca: GET-or-POST a public room using axios.
-// Frontend hits this once per outgoing call to mint a fresh room URL and to
-// learn the canonical `appMetricDomain` prefix to feed back into the SDK.
-//
-// env contract:
-//   METERED_SECRET_KEY  — required, no quotes/whitespace (Railway UI quirk)
-//   METERED_APP_NAME    — required, bare subdomain prefix like 'zapchat-server'
-//                         (frontend appends '.metered.live' at SDK-join time)
 app.post('/api/call/create-room', async (req, res) => {
-  // Auth gate — keeps the Metered secret from being burned by anonymous traffic.
   const decoded = verifyToken(req, res);
   if (!decoded) return;
 
   let { roomName } = req.body;
 
-  // Safely clean up hidden spaces or newline characters from the environment variables
   const secretKey = process.env.METERED_SECRET_KEY ? process.env.METERED_SECRET_KEY.trim() : null;
   const appName = process.env.METERED_APP_NAME ? process.env.METERED_APP_NAME.trim() : null;
 
@@ -472,11 +452,11 @@ app.post('/api/call/create-room', async (req, res) => {
     });
   }
 
-  // Ensure roomName is URL-safe and doesn't contain spaces
-  roomName = roomName ? String(roomName).replace(/\s+/g, '-') : `room-${Date.now()}`;
+  // Ensure roomName is safe and clean
+  roomName = roomName ? String(roomName).replace(/[^a-zA-Z0-9-_]/g, '') : `room-${Date.now()}`;
 
   try {
-    // Phase A: Test if the room already exists using explicit query params
+    // Phase A: GET checking expects secretKey as a query param
     const getUrl = `https://${appName}.metered.live/api/v1/room/${encodeURIComponent(roomName)}`;
     const response = await axios.get(getUrl, {
       params: { secretKey: secretKey },
@@ -490,15 +470,15 @@ app.post('/api/call/create-room', async (req, res) => {
     });
 
   } catch (error) {
-    // Phase B: If the room does not exist (404), create it using a secure POST request payload
+    // Phase B: POST creation expects secretKey inside the JSON body object payload
     if (error.response && error.response.status === 404) {
       try {
         const postUrl = `https://${appName}.metered.live/api/v1/room`;
         const createResponse = await axios.post(postUrl, {
+          secretKey: secretKey, // ✅ MOVED SECURELY TO THE BODY OBJECT
           roomName: roomName,
-          privacy: "public" // Explicitly public so users can handshake instantly without needing individual access tokens
+          privacy: "public" 
         }, {
-          params: { secretKey: secretKey },
           headers: {
             'Accept': 'application/json',
             'Content-Type': 'application/json'
@@ -521,7 +501,7 @@ app.post('/api/call/create-room', async (req, res) => {
   }
 });
 
-// ✅ SPA Wildcard Catch-all Path Fallback (MUST stay placed directly below other API routes)
+// ✅ SPA Wildcard Catch-all Path Fallback
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -540,7 +520,6 @@ const io = new Server(server, {
   cookie:        false,
 });
 
-// Socket Auth Verification Interceptor Middleware Layer
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error('Authentication required'));
@@ -550,7 +529,6 @@ io.use((socket, next) => {
   } catch { next(new Error('Invalid token')); }
 });
 
-// Socket Communications Broker Event Infrastructure
 io.on('connection', socket => {
   const { username } = socket.user;
   onlineUsers.set(username, socket.id);
@@ -604,14 +582,6 @@ io.on('connection', socket => {
   });
 
   // ─── Call Signaling State Machine ──────────────────────────────────────────
-  // State transitions:
-  //   idle → ringing (initiate-call)
-  //   ringing → connected (accept-call)
-  //   ringing → idle (reject-call / end-call)
-  //   connected → idle (end-call / disconnect)
-  // Every emit propagates `roomName` so both peers can verify they're joining
-  // the same Metered room and so the UI can reconcile if events arrive
-  // out-of-order (e.g. accept during disconnect).
   socket.on('initiate-call', ({ targetUserId, callerInfo, roomName, callType }) => {
     const targetSocket = onlineUsers.get(targetUserId);
     if (!targetSocket) {
@@ -633,8 +603,6 @@ io.on('connection', socket => {
     }
   });
 
-  // WhatsApp-style hard hangup: cleans up the server-side socket binding so
-  // a late `accept-call` from a stale tab cannot resurrect the call.
   socket.on('end-call', ({ targetUserId, roomName }) => {
     const otherSocket = onlineUsers.get(targetUserId);
     if (otherSocket) {
@@ -642,13 +610,10 @@ io.on('connection', socket => {
     }
   });
 
-  // Sudden network drop — broadcast to anyone who might be mid-call with us.
   socket.on('disconnect', reason => {
     onlineUsers.delete(username);
     console.log(`🔴 ${username} disconnected: ${reason}`);
     socket.broadcast.emit('user_status', { username, online: false });
-    // Surface a `user-disconnected` event for the call state machine so any
-    // active peer tears down their local WebRTC session cleanly.
     io.emit('user-disconnected', socket.id);
   });
 });
