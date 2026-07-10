@@ -435,6 +435,26 @@ app.get('/api/turn-credentials', async (req, res) => {
 });
 
 // ─── WebRTC Call Room Generator (Stateless Idempotent Wrapper) ───────────────
+//
+// URL construction contract:
+//   METERED_APP_NAME accepts EITHER form:
+//     a) bare subdomain prefix → 'zapchat-server'
+//     b) full domain           → 'zapchat-server.metered.live'
+//   The code normalizes both to a bare prefix before appending '.metered.live',
+//   so it NEVER produces the malformed 'zapchat-server.metered.live.metered.live'
+//   that causes TLS cert mismatch errors.
+//
+//   The actual Metered public API is at https://<app>.metered.live/api/v1/...
+//   (NOT *.azureedge.net — that's just the underlying Azure CDN cert that
+//   gets returned by an unrelated edge when the hostname doesn't match
+//   anything specific.)
+function resolveMeteredHost() {
+  const raw = process.env.METERED_APP_NAME ? process.env.METERED_APP_NAME.trim() : null;
+  if (!raw) return null;
+  // Strip any trailing '.metered.live' (case-insensitive) so we can re-append deterministically.
+  return raw.replace(/\.metered\.live$/i, '');
+}
+
 app.post('/api/call/create-room', async (req, res) => {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
@@ -442,9 +462,9 @@ app.post('/api/call/create-room', async (req, res) => {
   let { roomName } = req.body;
 
   const secretKey = process.env.METERED_SECRET_KEY ? process.env.METERED_SECRET_KEY.trim() : null;
-  const appName = process.env.METERED_APP_NAME ? process.env.METERED_APP_NAME.trim() : null;
+  const appPrefix = resolveMeteredHost();
 
-  if (!secretKey || !appName) {
+  if (!secretKey || !appPrefix) {
     console.error("CRITICAL ERROR: Metered environment variables are missing or unreadable on Railway.");
     return res.status(500).json({
       success: false,
@@ -452,12 +472,15 @@ app.post('/api/call/create-room', async (req, res) => {
     });
   }
 
+  // Canonical Metered base URL — built once from the normalized prefix.
+  const METERED_BASE = `https://${appPrefix}.metered.live/api/v1`;
+
   // Ensure roomName is safe and clean
   roomName = roomName ? String(roomName).replace(/[^a-zA-Z0-9-_]/g, '') : `room-${Date.now()}`;
 
   try {
     // Phase A: GET checking expects secretKey as a query param
-    const getUrl = `https://${appName}.metered.live/api/v1/room/${encodeURIComponent(roomName)}`;
+    const getUrl = `${METERED_BASE}/room/${encodeURIComponent(roomName)}`;
     const response = await axios.get(getUrl, {
       params: { secretKey: secretKey },
       headers: { 'Accept': 'application/json' }
@@ -466,18 +489,18 @@ app.post('/api/call/create-room', async (req, res) => {
     return res.status(200).json({
       success: true,
       roomName: response.data.roomName,
-      appMetricDomain: appName
+      appMetricDomain: appPrefix
     });
 
   } catch (error) {
     // Phase B: POST creation expects secretKey inside the JSON body object payload
     if (error.response && error.response.status === 404) {
       try {
-        const postUrl = `https://${appName}.metered.live/api/v1/room`;
+        const postUrl = `${METERED_BASE}/room`;
         const createResponse = await axios.post(postUrl, {
           secretKey: secretKey, // ✅ MOVED SECURELY TO THE BODY OBJECT
           roomName: roomName,
-          privacy: "public" 
+          privacy: "public"
         }, {
           headers: {
             'Accept': 'application/json',
@@ -488,7 +511,7 @@ app.post('/api/call/create-room', async (req, res) => {
         return res.status(200).json({
           success: true,
           roomName: createResponse.data.roomName,
-          appMetricDomain: appName
+          appMetricDomain: appPrefix
         });
       } catch (createError) {
         console.error("Metered Room Registration Failed:", createError.response ? createError.response.data : createError.message);
