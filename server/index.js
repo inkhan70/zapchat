@@ -364,78 +364,181 @@ app.get('/api/turn-credentials', async (req, res) => {
   }
 });
 
-// WebRTC Infrastructure Room Generator Endpoint
-app.post('/api/create-room', async (req, res) => {
+// ─── WebRTC Room Generator (Metered.ca) ─────────────────────────────────────
+// Handles both /api/create-room and /api/call/create-room (alias) so that
+// any frontend variant works without code changes.
+async function handleCreateRoom(req, res) {
   const decoded = verifyToken(req, res);
   if (!decoded) return;
 
+  // ── Env-var guard ─────────────────────────────────────────────────────────
   if (!METERED_SECRET_KEY) {
+    console.error('❌ METERED_SECRET_KEY is not set on this Railway deployment.');
     return res.status(500).json({ error: 'Metered secret key not configured on server.' });
   }
 
-  const withUser = (req.body && typeof req.body.with === 'string') ? req.body.with.trim() : '';
-  const explicit = (req.body && typeof req.body.roomName === 'string') ? req.body.roomName.trim() : '';
-  
-  const roomName = (explicit
-    || [decoded.username, withUser].filter(Boolean).sort().join('-').toLowerCase()
-                                   .replace(/[^a-z0-9-]/g, '-')
-    || `zc-${decoded.username.toLowerCase()}-${Date.now()}`)
-                      .slice(0, 60);
-  const privacy = (req.body && req.body.privacy === 'private') ? 'private' : 'public';
+  // ── Room-name derivation ──────────────────────────────────────────────────
+  const withUser = (req.body?.with    && typeof req.body.with    === 'string') ? req.body.with.trim()    : '';
+  const explicit = (req.body?.roomName && typeof req.body.roomName === 'string') ? req.body.roomName.trim() : '';
+
+  // Build a deterministic, URL-safe room name:
+  // priority → explicit body param → sorted pair → timestamped fallback
+  let roomName = (
+    explicit ||
+    [decoded.username, withUser].filter(Boolean).sort().join('-').toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')          // keep only safe chars
+      .replace(/^-+|-+$/g, '')              // strip leading/trailing dashes
+      .replace(/-{2,}/g, '-')               // collapse consecutive dashes
+  ) || `zc-${Date.now()}`;
+
+  roomName = roomName.slice(0, 60);
+
+  // Guard: sanitization must not produce an empty string
+  if (!roomName || roomName.length < 1) {
+    roomName = `zc-${decoded.username.toLowerCase().replace(/[^a-z0-9]/g, '')}-${Date.now()}`.slice(0, 60);
+  }
+
+  const privacy = (req.body?.privacy === 'private') ? 'private' : 'public';
+
+  // ── Detailed diagnostic logging ──────────────────────────────────────────
+  // Redacts the secret key but confirms it is present and shows its length
+  console.log('📞 create-room called', {
+    by:          decoded.username,
+    with:        withUser || '(none)',
+    roomName,
+    privacy,
+    meteredDomain:  METERED_APP_DOMAIN,
+    secretKeySet:   !!METERED_SECRET_KEY,
+    secretKeyLen:   METERED_SECRET_KEY ? METERED_SECRET_KEY.length : 0,
+    getURL:  `${METERED_API_BASE}/room/${encodeURIComponent(roomName)}?secretKey=***`,
+    postURL: `${METERED_API_BASE}/room?secretKey=***`,
+  });
 
   try {
     let room = null;
-    try {
-      const existing = await fetch(
-        `${METERED_API_BASE}/room/${encodeURIComponent(roomName)}?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`
-      );
-      if (existing.ok) room = await existing.json();
-    } catch (_) {}
 
+    // ── Step 1: Try GET to reuse an existing room ─────────────────────────
+    try {
+      const getURL = `${METERED_API_BASE}/room/${encodeURIComponent(roomName)}?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`;
+      const existing = await fetch(getURL, { headers: { Accept: 'application/json' } });
+      const getStatus = existing.status;
+      const getRaw    = await existing.text();
+      console.log(`🔍 GET room → HTTP ${getStatus}`, getRaw.substring(0, 200));
+
+      if (existing.ok) {
+        let parsed;
+        try { parsed = JSON.parse(getRaw); } catch (_) { parsed = null; }
+        // Validate: a real Metered room always has a `roomName` field
+        if (parsed && typeof parsed.roomName === 'string' && parsed.roomName.length > 0) {
+          room = parsed;
+          console.log('✅ Reusing existing Metered room:', room.roomName);
+        } else {
+          // HTTP 200 but body is an error payload like {message:'room not found'}
+          console.log('⚠️  GET returned 200 but no valid room — will create new room. Body:', getRaw.substring(0, 100));
+        }
+      }
+    } catch (getErr) {
+      // Network/TLS error on GET — log and fall through to POST
+      console.warn('⚠️  GET room network error (non-fatal, will try POST):', getErr.message);
+    }
+
+    // ── Step 2: Create room if not found ──────────────────────────────────
     if (!room) {
-      const createRes = await fetch(
-        `${METERED_API_BASE}/room?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`,
-        {
+      const postURL = `${METERED_API_BASE}/room?secretKey=${encodeURIComponent(METERED_SECRET_KEY)}`;
+      console.log(`🏗️  POST create-room → ${METERED_API_BASE}/room  (secretKey: ***[${METERED_SECRET_KEY.length}chars])`);
+
+      let createRes;
+      try {
+        createRes = await fetch(postURL, {
           method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Accept:         'application/json',
+          },
           body: JSON.stringify({
             roomName,
             privacy,
-            autoJoin:              true,
-            joinVideoOn:           true,
-            joinAudioOn:           true,
-            enableScreenSharing:   true,
-            enableChat:            true,
-            ejectAtRoomExp:        false,
+            autoJoin:            true,
+            joinVideoOn:         true,
+            joinAudioOn:         true,
+            enableScreenSharing: true,
+            enableChat:          true,
+            ejectAtRoomExp:      false,
           }),
-        }
-      );
+        });
+      } catch (postNetErr) {
+        console.error('❌ POST room network error — fetch threw:', postNetErr.message);
+        console.error('   ↳ Check METERED_APP_DOMAIN on Railway. Current value:', METERED_APP_DOMAIN);
+        console.error('   ↳ Expected format: <yourAppName>.metered.live');
+        return res.status(502).json({
+          error:  'Metered API unreachable — network error',
+          detail: postNetErr.message,
+          hint:   `Verify METERED_APP_DOMAIN on Railway is set to "<appname>.metered.live". Current: "${METERED_APP_DOMAIN}"`,
+        });
+      }
 
-      const raw = await createRes.text();
+      const createStatus = createRes.status;
+      const raw          = await createRes.text();
+      console.log(`📬 POST create-room → HTTP ${createStatus}`, raw.substring(0, 300));
+
       if (!createRes.ok) {
         let parsed;
         try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
         const detail = parsed?.message || parsed?.error || raw || createRes.statusText;
-        console.error('❌ Metered create-room failed', { status: createRes.status, roomName, detail });
-        return res.status(createRes.status).json({ error: 'Metered create-room failed', detail });
+        console.error('❌ Metered POST create-room failed', {
+          status: createStatus, roomName,
+          meteredDomain: METERED_APP_DOMAIN, detail,
+          hint: 'If status=401/403 → wrong secretKey. If status=404 → wrong domain.',
+        });
+        return res.status(createStatus < 500 ? createStatus : 502).json({
+          error:  'Metered create-room failed',
+          detail,
+          hint:   createStatus === 401 || createStatus === 403
+            ? 'Check METERED_SECRET_KEY on Railway Variables'
+            : `Check METERED_APP_DOMAIN. Current: "${METERED_APP_DOMAIN}"`,
+        });
       }
-      room = JSON.parse(raw);
+
+      let parsed;
+      try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+
+      // Validate the POST response is a real room object
+      if (!parsed || typeof parsed.roomName !== 'string') {
+        console.error('❌ Metered POST returned 200 but invalid room object:', raw.substring(0, 200));
+        console.error('   ↳ This usually means METERED_APP_DOMAIN is wrong.');
+        console.error('   ↳ Current domain:', METERED_APP_DOMAIN, '— should be "<appname>.metered.live"');
+        return res.status(502).json({
+          error:  'Metered returned unexpected response',
+          raw:    raw.substring(0, 200),
+          hint:   `METERED_APP_DOMAIN="${METERED_APP_DOMAIN}" may be wrong. Should be "<yourAppName>.metered.live"`,
+        });
+      }
+
+      room = parsed;
+      console.log('✅ Metered room created:', room.roomName);
     }
 
+    // ── Step 3: Return room info to frontend ──────────────────────────────
     return res.json({
-      roomName:      room.roomName,
-      roomId:        room._id,
-      privacy:       room.privacy,
-      roomURL:       `https://${METERED_APP_DOMAIN}/${room.roomName}`,
-      appDomain:     METERED_APP_DOMAIN,
-      publicURL:     `https://${METERED_APP_DOMAIN}/${room.roomName}`,
-      context:       withUser ? { self: decoded.username, with: withUser } : null,
+      roomName:  room.roomName,
+      roomId:    room._id,
+      privacy:   room.privacy,
+      roomURL:   `https://${METERED_APP_DOMAIN}/${room.roomName}`,
+      appDomain: METERED_APP_DOMAIN,
+      publicURL: `https://${METERED_APP_DOMAIN}/${room.roomName}`,
+      context:   withUser ? { self: decoded.username, with: withUser } : null,
     });
+
   } catch (err) {
-    console.error('❌ /api/create-room error:', err);
+    console.error('❌ /api/create-room unhandled error:', err.message, err.stack?.split('\n').slice(0,3).join(' | '));
     return res.status(500).json({ error: 'Internal error creating room', detail: err.message });
   }
-});
+}
+
+// Register both route paths — the original and the /call/ prefix variant
+app.post('/api/create-room',      handleCreateRoom);
+app.post('/api/call/create-room', handleCreateRoom);
+
 
 // ✅ SPA Wildcard Catch-all Path Fallback (MUST stay placed directly below other API routes)
 app.get('*', (_req, res) => {
